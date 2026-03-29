@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet, KeyboardAvoidingView, Platform, SafeAreaView, Dimensions, StatusBar, ScrollView } from 'react-native';
+import { API_BASE_URL } from '../config/api';
 
 const { width } = Dimensions.get('window');
 
@@ -22,7 +23,7 @@ export default function RegisterScreen({ navigation }) {
     }
 
     try {
-      const response = await fetch("http://127.0.0.1:8000/register", {
+      const response = await fetch(`${API_BASE_URL}/register`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -37,20 +38,20 @@ export default function RegisterScreen({ navigation }) {
       const data = await response.json();
 
       if (response.ok) {
-        alert("Kayıt başarılı! Lütfen giriş yapın.");
+        alert("Kayıt başarılı.");
         navigation.navigate("Login");
       } else {
         alert(data.detail || "Kayıt sırasında bir hata oluştu.");
       }
     } catch (error) {
       console.error(error);
-      alert("Sunucuya bağlanılamadı. Lütfen backend'in çalıştığından emin olun.");
+      alert(`Sunucuya bağlanılamadı. Hedef: ${API_BASE_URL}`);
     }
   };
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#0A192F" />
+      <StatusBar barStyle="dark-content" backgroundColor="#FFF8E8" />
       <KeyboardAvoidingView 
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.innerContainer}
@@ -75,7 +76,7 @@ export default function RegisterScreen({ navigation }) {
                     focusedInput === 'name' && styles.inputFocused
                   ]}
                   placeholder="Adınız ve Soyadınız"
-                  placeholderTextColor="#64748B"
+                  placeholderTextColor="#B8985A"
                   value={name}
                   onChangeText={setName}
                   onFocus={() => setFocusedInput('name')}
@@ -91,7 +92,7 @@ export default function RegisterScreen({ navigation }) {
                     focusedInput === 'email' && styles.inputFocused
                   ]}
                   placeholder="ornek@email.com"
-                  placeholderTextColor="#64748B"
+                  placeholderTextColor="#B8985A"
                   keyboardType="email-address"
                   autoCapitalize="none"
                   value={email}
@@ -109,8 +110,11 @@ export default function RegisterScreen({ navigation }) {
                     focusedInput === 'password' && styles.inputFocused
                   ]}
                   placeholder="••••••••"
-                  placeholderTextColor="#64748B"
+                  placeholderTextColor="#B8985A"
                   secureTextEntry
+                  autoComplete="off"
+                  textContentType="none"
+                  importantForAutofill="no"
                   value={password}
                   onChangeText={setPassword}
                   onFocus={() => setFocusedInput('password')}
@@ -126,8 +130,11 @@ export default function RegisterScreen({ navigation }) {
                     focusedInput === 'confirmPassword' && styles.inputFocused
                   ]}
                   placeholder="••••••••"
-                  placeholderTextColor="#64748B"
+                  placeholderTextColor="#B8985A"
                   secureTextEntry
+                  autoComplete="off"
+                  textContentType="none"
+                  importantForAutofill="no"
                   value={confirmPassword}
                   onChangeText={setConfirmPassword}
                   onFocus={() => setFocusedInput('confirmPassword')}
@@ -156,7 +163,7 @@ export default function RegisterScreen({ navigation }) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0A192F', 
+    backgroundColor: '#FFF8E8',
   },
   scrollContent: {
     flexGrow: 1,
@@ -168,7 +175,7 @@ const styles = StyleSheet.create({
     width: width * 0.8,
     height: width * 0.8,
     borderRadius: width * 0.4,
-    backgroundColor: '#3B82F6', 
+    backgroundColor: '#F59E0B',
     opacity: 0.15,
     transform: [{ scale: 1.2 }],
   },
@@ -179,7 +186,7 @@ const styles = StyleSheet.create({
     width: width * 0.9,
     height: width * 0.9,
     borderRadius: width * 0.45,
-    backgroundColor: '#0EA5E9',
+    backgroundColor: '#FBBF24',
     opacity: 0.12,
   },
   innerContainer: {
@@ -198,13 +205,13 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 38,
     fontWeight: '900',
-    color: '#F0F9FF',
+    color: '#8A4B00',
     marginBottom: 12,
     letterSpacing: -0.5,
   },
   subtitle: {
     fontSize: 16,
-    color: '#BAE6FD',
+    color: '#B26A00',
     fontWeight: '400',
     lineHeight: 24,
   },
@@ -216,43 +223,43 @@ const styles = StyleSheet.create({
   },
   label: {
     fontSize: 14,
-    color: '#E0F2FE',
+    color: '#8A6A00',
     marginBottom: 10,
     fontWeight: '600',
     letterSpacing: 0.3,
   },
   input: {
-    backgroundColor: 'rgba(15, 23, 42, 0.6)',
+    backgroundColor: '#FFF3D9',
     borderRadius: 16,
     padding: 18,
-    color: '#F0F9FF',
+    color: '#5B3A00',
     fontSize: 16,
     borderWidth: 1.5,
-    borderColor: 'rgba(56, 189, 248, 0.2)',
+    borderColor: '#F4D7A1',
   },
   inputFocused: {
-    borderColor: '#38BDF8',
-    backgroundColor: 'rgba(15, 23, 42, 0.8)',
-    shadowColor: '#38BDF8',
+    borderColor: '#F59E0B',
+    backgroundColor: '#FFEBC9',
+    shadowColor: '#F59E0B',
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.25,
     shadowRadius: 10,
     elevation: 5,
   },
   registerButton: {
-    backgroundColor: '#0284C7', 
+    backgroundColor: '#F59E0B',
     borderRadius: 16,
     paddingVertical: 18,
     alignItems: 'center',
     marginTop: 10,
-    shadowColor: '#0284C7',
+    shadowColor: '#F59E0B',
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.4,
     shadowRadius: 16,
     elevation: 10,
   },
   registerButtonText: {
-    color: '#ffffff',
+    color: '#3F2A00',
     fontSize: 18,
     fontWeight: '800',
     letterSpacing: 0.5,
@@ -265,11 +272,11 @@ const styles = StyleSheet.create({
     marginBottom: 40,
   },
   footerText: {
-    color: '#BAE6FD',
+    color: '#B26A00',
     fontSize: 15,
   },
   loginText: {
-    color: '#7DD3FC',
+    color: '#8A4B00',
     fontSize: 15,
     fontWeight: 'bold',
   },

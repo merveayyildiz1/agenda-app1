@@ -120,6 +120,26 @@ def login_user(user: schemas.UserLogin, db: Session = Depends(get_db)):
     )
     return {"access_token": access_token, "token_type": "bearer", "full_name": db_user.full_name}
 
+@app.put("/me/password")
+def change_password(
+    payload: schemas.PasswordChangeRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    if not verify_password(payload.current_password, current_user.hashed_password):
+        raise HTTPException(status_code=400, detail="Mevcut sifre hatali.")
+
+    new_password = payload.new_password.strip()
+    if len(new_password) < 6:
+        raise HTTPException(status_code=400, detail="Yeni sifre en az 6 karakter olmali.")
+
+    if verify_password(new_password, current_user.hashed_password):
+        raise HTTPException(status_code=400, detail="Yeni sifre eski sifre ile ayni olamaz.")
+
+    current_user.hashed_password = get_password_hash(new_password)
+    db.commit()
+    return {"message": "Sifre basariyla degistirildi."}
+
 
 @app.get("/journal", response_model=list[schemas.JournalEntryOut])
 def list_journal_entries(

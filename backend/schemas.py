@@ -38,3 +38,20 @@ class JournalEntryOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class AgendaTaskCreate(BaseModel):
+    task_date: str
+    content: str
+    color: str
+
+
+class AgendaTaskOut(BaseModel):
+    id: int
+    task_date: str
+    content: str
+    color: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

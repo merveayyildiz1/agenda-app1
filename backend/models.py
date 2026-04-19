@@ -18,3 +18,14 @@ class JournalEntry(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     content = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class AgendaTask(Base):
+    __tablename__ = "agenda_tasks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    task_date = Column(String, nullable=False, index=True)
+    content = Column(Text, nullable=False)
+    color = Column(String, nullable=False, default="#EF4444")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

@@ -196,5 +196,65 @@ def update_journal_entry(
     return journal_entry
 
 
+@app.get("/agenda", response_model=list[schemas.AgendaTaskOut])
+def list_agenda_tasks(
+    task_date: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    query = db.query(models.AgendaTask).filter(models.AgendaTask.user_id == current_user.id)
+    if task_date:
+        query = query.filter(models.AgendaTask.task_date == task_date)
+    return query.order_by(models.AgendaTask.created_at.asc()).all()
+
+
+@app.post("/agenda", response_model=schemas.AgendaTaskOut)
+def create_agenda_task(
+    task: schemas.AgendaTaskCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    content = task.content.strip()
+    task_date = task.task_date.strip()
+    color = task.color.strip()
+
+    if not content:
+        raise HTTPException(status_code=400, detail="Gorev icerigi bos olamaz.")
+    if not task_date:
+        raise HTTPException(status_code=400, detail="Tarih alani zorunlu.")
+    if not color:
+        raise HTTPException(status_code=400, detail="Renk alani zorunlu.")
+
+    new_task = models.AgendaTask(
+        user_id=current_user.id,
+        task_date=task_date,
+        content=content,
+        color=color,
+    )
+    db.add(new_task)
+    db.commit()
+    db.refresh(new_task)
+    return new_task
+
+
+@app.delete("/agenda/{task_id}")
+def delete_agenda_task(
+    task_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    task = (
+        db.query(models.AgendaTask)
+        .filter(models.AgendaTask.id == task_id, models.AgendaTask.user_id == current_user.id)
+        .first()
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="Gorev bulunamadi.")
+
+    db.delete(task)
+    db.commit()
+    return {"message": "Gorev silindi."}
+
+
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

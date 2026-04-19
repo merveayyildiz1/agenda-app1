@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { View, Text, StyleSheet, SafeAreaView, TouchableOpacity, StatusBar, TextInput, ScrollView, Platform, Alert, Image, useWindowDimensions } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Notifications from 'expo-notifications';
+import { GestureHandlerRootView, RectButton, Swipeable } from 'react-native-gesture-handler';
 import { API_BASE_URL } from '../config/api';
 
 const THEME_KEY = 'agenda_theme';
@@ -20,6 +21,27 @@ Notifications.setNotificationHandler({
   }),
 });
 
+const AGENDA_COLORS = ['#EF4444', '#F97316', '#F59E0B', '#10B981', '#3B82F6', '#8B5CF6', '#EC4899'];
+
+const toDateKey = (date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const buildDateStrip = (days = 10, baseDate = new Date()) => {
+  return Array.from({ length: days }, (_, index) => {
+    const nextDate = new Date(baseDate);
+    nextDate.setDate(baseDate.getDate() + index);
+    return {
+      key: toDateKey(nextDate),
+      dayNumber: nextDate.getDate(),
+      dayShort: nextDate.toLocaleDateString('tr-TR', { weekday: 'short' }).replace('.', ''),
+    };
+  });
+};
+
 export default function HomeScreen({ authToken, onLogout }) {
   const [activeTab, setActiveTab] = useState('Ajanda');
   const [journalText, setJournalText] = useState('');
@@ -35,7 +57,14 @@ export default function HomeScreen({ authToken, onLogout }) {
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [passwordSectionExpanded, setPasswordSectionExpanded] = useState(false);
+  const [agendaTasks, setAgendaTasks] = useState([]);
+  const [agendaTaskText, setAgendaTaskText] = useState('');
+  const [selectedAgendaDate, setSelectedAgendaDate] = useState(() => toDateKey(new Date()));
+  const [selectedTaskColor, setSelectedTaskColor] = useState(AGENDA_COLORS[0]);
   const notebookLines = Array.from({ length: 28 });
+  const agendaDateStrip = useMemo(() => buildDateStrip(14), []);
+  const agendaDateScrollRef = useRef(null);
+  const agendaDateScrollXRef = useRef(0);
   const { height: windowHeight } = useWindowDimensions();
 
   const isDarkTheme = theme === 'dark';
@@ -153,6 +182,34 @@ export default function HomeScreen({ authToken, onLogout }) {
 
     loadJournalEntries();
   }, [authToken, onLogout]);
+
+  useEffect(() => {
+    const loadAgendaTasks = async () => {
+      if (!authToken) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`${API_BASE_URL}/agenda?task_date=${selectedAgendaDate}`, {
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+          },
+        });
+        const data = await response.json();
+        if (response.status === 401) {
+          onLogout?.();
+          return;
+        }
+        if (response.ok && Array.isArray(data)) {
+          setAgendaTasks(data);
+        }
+      } catch (error) {
+        console.error('Ajanda gorevleri yuklenemedi:', error);
+      }
+    };
+
+    loadAgendaTasks();
+  }, [authToken, onLogout, selectedAgendaDate]);
 
   const screenContent = useMemo(() => {
     if (activeTab === 'Kronometre') {
@@ -461,10 +518,131 @@ export default function HomeScreen({ authToken, onLogout }) {
     }
   };
 
+  const saveAgendaTask = async () => {
+    const trimmedTask = agendaTaskText.trim();
+    if (!trimmedTask || !authToken) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/agenda`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({
+          task_date: selectedAgendaDate,
+          content: trimmedTask,
+          color: selectedTaskColor,
+        }),
+      });
+      const data = await response.json();
+
+      if (response.status === 401) {
+        onLogout?.();
+        return;
+      }
+      if (!response.ok) {
+        Alert.alert('Hata', data.detail || 'Gorev kaydedilemedi.');
+        return;
+      }
+
+      setAgendaTasks((prev) => [...prev, data]);
+      setAgendaTaskText('');
+    } catch (error) {
+      console.error('Ajanda gorevi kaydedilemedi:', error);
+      Alert.alert('Hata', 'Sunucuya baglanirken bir sorun olustu.');
+    }
+  };
+
+  const deleteAgendaTask = async (taskId) => {
+    if (!authToken) {
+      return;
+    }
+
+    const id = Number(taskId);
+    if (!Number.isFinite(id)) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/agenda/${id}`, {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+        },
+      });
+      let data = {};
+      try {
+        const text = await response.text();
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        data = {};
+      }
+
+      if (response.status === 401) {
+        onLogout?.();
+        return;
+      }
+      if (!response.ok) {
+        const detail = typeof data.detail === 'string' ? data.detail : 'Gorev silinemedi.';
+        Alert.alert('Hata', detail);
+        return;
+      }
+
+      setAgendaTasks((prev) => prev.filter((task) => Number(task.id) !== id));
+    } catch (error) {
+      console.error('Ajanda gorevi silinemedi:', error);
+      Alert.alert('Hata', 'Sunucuya baglanirken bir sorun olustu.');
+    }
+  };
+
+  const askDeleteAgendaTask = (taskId) => {
+    const runDelete = () => deleteAgendaTask(taskId);
+    if (Platform.OS === 'web') {
+      const ok = typeof globalThis.confirm === 'function' && globalThis.confirm('Bu gorevi silmek istiyor musun?');
+      if (ok) {
+        runDelete();
+      }
+      return;
+    }
+    Alert.alert('Gorev Sil', 'Bu gorevi silmek istiyor musun?', [
+      { text: 'Vazgec', style: 'cancel' },
+      {
+        text: 'Sil',
+        style: 'destructive',
+        onPress: runDelete,
+      },
+    ]);
+  };
+
+  const renderAgendaRightAction = (taskId) => (
+    <RectButton style={styles.agendaSwipeDeleteAction} onPress={() => askDeleteAgendaTask(taskId)}>
+      <Ionicons name="trash" size={16} color="#FFFFFF" />
+      <Text style={styles.agendaSwipeDeleteText}>Sil</Text>
+    </RectButton>
+  );
+
+  const handleAgendaDateStripScroll = (event) => {
+    agendaDateScrollXRef.current = event?.nativeEvent?.contentOffset?.x || 0;
+  };
+
+  const scrollAgendaDateStripRight = () => {
+    const nextOffset = agendaDateScrollXRef.current + 140;
+    agendaDateScrollRef.current?.scrollTo({ x: nextOffset, animated: true });
+  };
+
+  const scrollAgendaDateStripLeft = () => {
+    const nextOffset = Math.max(0, agendaDateScrollXRef.current - 140);
+    agendaDateScrollRef.current?.scrollTo({ x: nextOffset, animated: true });
+  };
+
   return (
+    <GestureHandlerRootView style={styles.gestureRoot}>
     <SafeAreaView style={[styles.container, { backgroundColor: palette.pageBg }]}>
       <StatusBar barStyle={isDarkTheme ? 'light-content' : 'dark-content'} backgroundColor={palette.pageBg} />
-      <View style={[styles.content, activeTab === 'Ayarlar' && styles.contentSettings]}>
+      <View style={[styles.content, (activeTab === 'Ayarlar' || activeTab === 'Ajanda') && styles.contentSettings]}>
         {activeTab === 'Gunluk' ? (
           <View style={styles.journalLayout}>
             <View style={[styles.journalSidebar, { backgroundColor: palette.cardBg, borderColor: palette.border }]}>
@@ -517,6 +695,134 @@ export default function HomeScreen({ authToken, onLogout }) {
                 />
                 <TouchableOpacity style={styles.saveButton} onPress={saveJournalEntry}>
                   <Text style={styles.saveButtonText}>{selectedEntryId ? 'Guncelle' : 'Kaydet'}</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        ) : activeTab === 'Ajanda' ? (
+          <View style={styles.agendaLayout}>
+            <View style={[styles.agendaDateStripWrap, { borderColor: palette.border, backgroundColor: palette.cardBg }]}>
+              <ScrollView
+                ref={agendaDateScrollRef}
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.agendaDateStripContent}
+                onScroll={handleAgendaDateStripScroll}
+                scrollEventThrottle={16}
+              >
+                {agendaDateStrip.map((dateItem) => {
+                  const isActive = selectedAgendaDate === dateItem.key;
+                  return (
+                    <TouchableOpacity
+                      key={dateItem.key}
+                      style={[
+                        styles.agendaDatePill,
+                        {
+                          borderColor: isActive ? '#F59E0B' : palette.border,
+                          backgroundColor: isActive ? '#FDE7C0' : isDarkTheme ? '#243244' : '#FFF8E8',
+                        },
+                      ]}
+                      onPress={() => setSelectedAgendaDate(dateItem.key)}
+                      activeOpacity={0.85}
+                    >
+                      <Text style={[styles.agendaDateDay, { color: palette.textPrimary }]}>{dateItem.dayShort}</Text>
+                      <Text style={[styles.agendaDateNumber, { color: palette.textPrimary }]}>{dateItem.dayNumber}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+              <TouchableOpacity
+                style={[styles.agendaDateStripArrowHint, styles.agendaDateStripArrowHintLeft]}
+                onPress={scrollAgendaDateStripLeft}
+                activeOpacity={0.85}
+              >
+                <Ionicons name="chevron-back" size={18} color="#E67E22" />
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.agendaDateStripArrowHint, styles.agendaDateStripArrowHintRight]}
+                onPress={scrollAgendaDateStripRight}
+                activeOpacity={0.85}
+              >
+                <Ionicons name="chevron-forward" size={18} color="#E67E22" />
+              </TouchableOpacity>
+            </View>
+
+            <View style={[styles.agendaTasksCard, { borderColor: palette.border, backgroundColor: palette.cardBg }]}>
+              <Text style={[styles.agendaTasksTitle, { color: palette.textPrimary }]}>
+                {new Date(selectedAgendaDate).toLocaleDateString(language === 'en' ? 'en-US' : 'tr-TR', {
+                  weekday: 'long',
+                  day: 'numeric',
+                  month: 'long',
+                })}
+              </Text>
+
+              <ScrollView
+                style={styles.agendaTaskList}
+                contentContainerStyle={styles.agendaTaskListContent}
+                nestedScrollEnabled
+                keyboardShouldPersistTaps="handled"
+              >
+                {agendaTasks.length === 0 ? (
+                  <Text style={[styles.agendaEmptyText, { color: palette.textSecondary }]}>
+                    Bu gun icin henuz gorev eklenmedi.
+                  </Text>
+                ) : (
+                  agendaTasks.map((task) => (
+                    <Swipeable
+                      key={task.id}
+                      overshootRight={false}
+                      renderRightActions={() => renderAgendaRightAction(task.id)}
+                    >
+                      <View style={[styles.agendaTaskRow, { borderColor: palette.border, backgroundColor: isDarkTheme ? '#1E293B' : '#FFFDF5' }]}>
+                        <View style={[styles.agendaTaskColorStripe, { backgroundColor: task.color || '#EF4444' }]} />
+                        <View style={styles.agendaTaskBody}>
+                          <Text style={[styles.agendaTaskText, { color: palette.textPrimary }]}>{task.content}</Text>
+                          <View style={styles.agendaTaskActions}>
+                            <View style={[styles.agendaTaskColorBadge, { backgroundColor: task.color || '#EF4444' }]} />
+                            <View style={[styles.agendaSwipeHintBadge, { backgroundColor: isDarkTheme ? '#7F1D1D' : '#FEE2E2' }]}>
+                              <Ionicons name="chevron-back" size={12} color={isDarkTheme ? '#FCA5A5' : '#B91C1C'} />
+                            </View>
+                          </View>
+                        </View>
+                      </View>
+                    </Swipeable>
+                  ))
+                )}
+              </ScrollView>
+
+              <View style={[styles.agendaComposer, { borderColor: palette.border, backgroundColor: isDarkTheme ? '#0F172A' : '#FFF8EA' }]}>
+                <TextInput
+                  value={agendaTaskText}
+                  onChangeText={setAgendaTaskText}
+                  placeholder="Bugun ne yapacaksin?"
+                  placeholderTextColor={isDarkTheme ? '#94A3B8' : '#9CA3AF'}
+                  style={[styles.agendaInput, { color: palette.textPrimary }]}
+                />
+                <Text style={[styles.agendaColorHint, { color: palette.textSecondary }]}>Gorevin onemini bir renk secerek belirt.</Text>
+                <View style={styles.agendaColorRow}>
+                  {AGENDA_COLORS.map((color) => {
+                    const selected = selectedTaskColor === color;
+                    return (
+                      <TouchableOpacity
+                        key={color}
+                        style={[
+                          styles.agendaColorSwatch,
+                          {
+                            backgroundColor: color,
+                            borderColor: selected ? '#FFFFFF' : 'rgba(255,255,255,0.55)',
+                            transform: [{ scale: selected ? 1.03 : 1 }],
+                          },
+                        ]}
+                        onPress={() => setSelectedTaskColor(color)}
+                        activeOpacity={0.9}
+                      >
+                        {selected ? <Ionicons name="checkmark" size={17} color="#FFFFFF" /> : null}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                <TouchableOpacity style={styles.agendaSaveButton} onPress={saveAgendaTask}>
+                  <Text style={styles.agendaSaveButtonText}>Kaydet</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -736,7 +1042,7 @@ export default function HomeScreen({ authToken, onLogout }) {
             <Text style={[styles.subtitle, { color: palette.textSecondary }]}>{screenContent.subtitle}</Text>
           </>
         )}
-        {activeTab !== 'Gunluk' && activeTab !== 'Ayarlar' && (
+        {activeTab !== 'Gunluk' && activeTab !== 'Ayarlar' && activeTab !== 'Ajanda' && (
           <TouchableOpacity
             style={styles.logoutButton}
             onPress={onLogout}
@@ -848,10 +1154,14 @@ export default function HomeScreen({ authToken, onLogout }) {
         </TouchableOpacity>
       </View>
     </SafeAreaView>
+    </GestureHandlerRootView>
   );
 }
 
 const styles = StyleSheet.create({
+  gestureRoot: {
+    flex: 1,
+  },
   container: {
     flex: 1,
     backgroundColor: '#FFF8E8',
@@ -939,6 +1249,193 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 12,
     marginBottom: 20,
+  },
+  agendaLayout: {
+    width: '100%',
+    flex: 1,
+    gap: 12,
+    marginBottom: 12,
+  },
+  agendaDateStripWrap: {
+    borderWidth: 1,
+    borderRadius: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    position: 'relative',
+  },
+  agendaDateStripArrowHint: {
+    position: 'absolute',
+    top: '50%',
+    marginTop: -14,
+    width: 28,
+    height: 28,
+    borderRadius: 999,
+    backgroundColor: 'rgba(230, 126, 34, 0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  agendaDateStripArrowHintLeft: {
+    left: 6,
+  },
+  agendaDateStripArrowHintRight: {
+    right: 6,
+  },
+  agendaDateStripContent: {
+    gap: 10,
+    paddingLeft: 40,
+    paddingRight: 40,
+  },
+  agendaDatePill: {
+    width: 64,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingVertical: 8,
+    alignItems: 'center',
+  },
+  agendaDateDay: {
+    fontSize: 11,
+    textTransform: 'capitalize',
+    marginBottom: 3,
+  },
+  agendaDateNumber: {
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  agendaTasksCard: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 12,
+    gap: 10,
+  },
+  agendaTasksTitle: {
+    fontSize: 17,
+    fontWeight: '800',
+    textTransform: 'capitalize',
+  },
+  agendaTaskList: {
+    flex: 1,
+  },
+  agendaTaskListContent: {
+    gap: 8,
+    paddingBottom: 8,
+  },
+  agendaTaskRow: {
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  agendaTaskColorStripe: {
+    width: 8,
+    alignSelf: 'stretch',
+    borderRadius: 99,
+  },
+  agendaTaskBody: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  agendaTaskActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  agendaTaskText: {
+    flex: 1,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  agendaTaskColorBadge: {
+    width: 16,
+    height: 16,
+    borderRadius: 999,
+  },
+  agendaSwipeHintBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 0,
+    paddingHorizontal: 6,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+  agendaSwipeDeleteAction: {
+    width: 84,
+    borderRadius: 12,
+    marginLeft: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#DC2626',
+    gap: 2,
+  },
+  agendaSwipeDeleteText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  agendaEmptyText: {
+    fontSize: 13,
+    textAlign: 'center',
+    marginTop: 10,
+  },
+  agendaComposer: {
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 10,
+    gap: 10,
+  },
+  agendaInput: {
+    borderWidth: 0,
+    borderRadius: 10,
+    fontSize: 14,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    ...Platform.select({
+      web: {
+        outlineStyle: 'none',
+      },
+    }),
+  },
+  agendaColorRow: {
+    flexDirection: 'row',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  agendaColorHint: {
+    fontSize: 12,
+  },
+  agendaColorSwatch: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.18,
+    shadowRadius: 3,
+    shadowOffset: {
+      width: 0,
+      height: 1,
+    },
+    elevation: 2,
+  },
+  agendaSaveButton: {
+    alignSelf: 'flex-end',
+    backgroundColor: '#F59E0B',
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 10,
+  },
+  agendaSaveButtonText: {
+    color: '#3F2A00',
+    fontSize: 13,
+    fontWeight: '800',
   },
   journalSidebar: {
     width: 170,

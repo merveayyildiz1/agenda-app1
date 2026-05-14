@@ -46,11 +46,16 @@ class AgendaTaskCreate(BaseModel):
     color: str
 
 
+class AgendaTaskStatusUpdate(BaseModel):
+    completed: bool
+
+
 class AgendaTaskOut(BaseModel):
     id: int
     task_date: str
     content: str
     color: str
+    completed: bool
     created_at: datetime
 
     class Config:

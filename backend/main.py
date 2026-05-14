@@ -29,7 +29,21 @@ def ensure_journal_user_column():
         conn.close()
 
 
+def ensure_agenda_completed_column():
+    conn = sqlite3.connect("agenda.db")
+    try:
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(agenda_tasks)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "completed" not in columns:
+            cursor.execute("ALTER TABLE agenda_tasks ADD COLUMN completed INTEGER NOT NULL DEFAULT 0")
+            conn.commit()
+    finally:
+        conn.close()
+
+
 ensure_journal_user_column()
+ensure_agenda_completed_column()
 
 app.add_middleware(
     CORSMiddleware,
@@ -254,6 +268,27 @@ def delete_agenda_task(
     db.delete(task)
     db.commit()
     return {"message": "Gorev silindi."}
+
+
+@app.put("/agenda/{task_id}/status", response_model=schemas.AgendaTaskOut)
+def update_agenda_task_status(
+    task_id: int,
+    payload: schemas.AgendaTaskStatusUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    task = (
+        db.query(models.AgendaTask)
+        .filter(models.AgendaTask.id == task_id, models.AgendaTask.user_id == current_user.id)
+        .first()
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="Gorev bulunamadi.")
+
+    task.completed = payload.completed
+    db.commit()
+    db.refresh(task)
+    return task
 
 
 if __name__ == "__main__":

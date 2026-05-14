@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from database import Base
 
 class User(Base):
@@ -28,4 +28,5 @@ class AgendaTask(Base):
     task_date = Column(String, nullable=False, index=True)
     content = Column(Text, nullable=False)
     color = Column(String, nullable=False, default="#EF4444")
+    completed = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, StyleSheet, SafeAreaView, TouchableOpacity, StatusBar, TextInput, ScrollView, Platform, Alert, Image, useWindowDimensions } from 'react-native';
+import { View, Text, StyleSheet, SafeAreaView, TouchableOpacity, StatusBar, TextInput, ScrollView, Platform, Alert, Image, useWindowDimensions, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Notifications from 'expo-notifications';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { GestureHandlerRootView, RectButton, Swipeable } from 'react-native-gesture-handler';
 import { API_BASE_URL } from '../config/api';
 
@@ -12,6 +13,43 @@ const NOTIFICATIONS_KEY = 'agenda_notifications_enabled';
 const LANGUAGE_KEY = 'agenda_language';
 const NOTIFICATION_HOUR_KEY = 'agenda_notification_hour';
 const NOTIFICATION_MINUTE_KEY = 'agenda_notification_minute';
+const LOCAL_STATS_KEY = 'agenda_local_stats_v1';
+
+const defaultLocalStats = () => ({
+  stopwatchTotalMs: 0,
+  stopwatchPauseCount: 0,
+});
+
+const persistLocalStats = async (next) => {
+  try {
+    await AsyncStorage.setItem(LOCAL_STATS_KEY, JSON.stringify(next));
+  } catch (error) {
+    console.warn('Local stats write failed:', error);
+  }
+};
+
+const formatHumanDuration = (ms, lang) => {
+  const totalSec = Math.max(0, Math.floor(Number(ms) / 1000));
+  const hour = Math.floor(totalSec / 3600);
+  const min = Math.floor((totalSec % 3600) / 60);
+  const sec = totalSec % 60;
+  if (lang === 'en') {
+    if (hour > 0) {
+      return `${hour}h ${min}m`;
+    }
+    if (min > 0) {
+      return `${min}m ${sec}s`;
+    }
+    return `${sec}s`;
+  }
+  if (hour > 0) {
+    return `${hour} sa ${min} dk`;
+  }
+  if (min > 0) {
+    return `${min} dk ${sec} sn`;
+  }
+  return `${sec} sn`;
+};
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -30,6 +68,56 @@ const toDateKey = (date) => {
   return `${year}-${month}-${day}`;
 };
 
+const formatStopwatchDisplay = (totalMs) => {
+  const clamped = Math.max(0, totalMs);
+  const centi = Math.floor((clamped % 1000) / 10);
+  const totalSec = Math.floor(clamped / 1000);
+  const sec = totalSec % 60;
+  const min = Math.floor(totalSec / 60) % 60;
+  const hour = Math.floor(totalSec / 3600);
+  const pad2 = (n) => String(n).padStart(2, '0');
+  if (hour > 0) {
+    return `${hour}:${pad2(min)}:${pad2(sec)}.${pad2(centi)}`;
+  }
+  return `${pad2(min)}:${pad2(sec)}.${pad2(centi)}`;
+};
+
+const parseDateKey = (dateKey) => {
+  const [year, month, day] = String(dateKey || '').split('-').map(Number);
+  if (!year || !month || !day) {
+    return new Date();
+  }
+  return new Date(year, month - 1, day);
+};
+
+const addDays = (date, amount) => {
+  const nextDate = new Date(date);
+  nextDate.setDate(nextDate.getDate() + amount);
+  return nextDate;
+};
+
+const toColorWithAlpha = (hexColor, alpha = 0.2) => {
+  const safeAlpha = Math.max(0, Math.min(1, alpha));
+  const normalized = String(hexColor || '').trim();
+  const validHex = /^#([A-Fa-f0-9]{6})$/.test(normalized);
+  if (!validHex) {
+    return `rgba(245, 158, 11, ${safeAlpha})`;
+  }
+  const red = parseInt(normalized.slice(1, 3), 16);
+  const green = parseInt(normalized.slice(3, 5), 16);
+  const blue = parseInt(normalized.slice(5, 7), 16);
+  return `rgba(${red}, ${green}, ${blue}, ${safeAlpha})`;
+};
+
+const getMonthStart = (date) => new Date(date.getFullYear(), date.getMonth(), 1);
+
+const getMonthGridDays = (monthDate) => {
+  const monthStart = getMonthStart(monthDate);
+  const firstWeekDayIndex = (monthStart.getDay() + 6) % 7;
+  const gridStart = addDays(monthStart, -firstWeekDayIndex);
+  return Array.from({ length: 42 }, (_, index) => addDays(gridStart, index));
+};
+
 const buildDateStrip = (days = 10, baseDate = new Date()) => {
   return Array.from({ length: days }, (_, index) => {
     const nextDate = new Date(baseDate);
@@ -43,6 +131,7 @@ const buildDateStrip = (days = 10, baseDate = new Date()) => {
 };
 
 export default function HomeScreen({ authToken, onLogout }) {
+  const todayRef = useRef(new Date());
   const [activeTab, setActiveTab] = useState('Ajanda');
   const [journalText, setJournalText] = useState('');
   const [journalEntries, setJournalEntries] = useState([]);
@@ -58,14 +147,29 @@ export default function HomeScreen({ authToken, onLogout }) {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [passwordSectionExpanded, setPasswordSectionExpanded] = useState(false);
   const [agendaTasks, setAgendaTasks] = useState([]);
+  const [agendaMonthTasks, setAgendaMonthTasks] = useState([]);
   const [agendaTaskText, setAgendaTaskText] = useState('');
   const [selectedAgendaDate, setSelectedAgendaDate] = useState(() => toDateKey(new Date()));
+  const [agendaViewMode, setAgendaViewMode] = useState('list');
+  const [agendaCalendarMonthDate, setAgendaCalendarMonthDate] = useState(() => getMonthStart(new Date()));
+  const [agendaStripStartOffset, setAgendaStripStartOffset] = useState(-7);
   const [selectedTaskColor, setSelectedTaskColor] = useState(AGENDA_COLORS[0]);
   const notebookLines = Array.from({ length: 28 });
-  const agendaDateStrip = useMemo(() => buildDateStrip(14), []);
+  const agendaDateStrip = useMemo(
+    () => buildDateStrip(21, addDays(todayRef.current, agendaStripStartOffset)),
+    [agendaStripStartOffset]
+  );
   const agendaDateScrollRef = useRef(null);
   const agendaDateScrollXRef = useRef(0);
+  const [agendaStripViewportWidth, setAgendaStripViewportWidth] = useState(0);
   const { height: windowHeight } = useWindowDimensions();
+  const [stopwatchRunning, setStopwatchRunning] = useState(false);
+  const [stopwatchRenderTick, setStopwatchRenderTick] = useState(0);
+  const stopwatchAccumulatedRef = useRef(0);
+  const stopwatchSegmentStartRef = useRef(null);
+  const [localStats, setLocalStats] = useState(() => defaultLocalStats());
+  const [statsAgendaAll, setStatsAgendaAll] = useState([]);
+  const [statsAgendaLoading, setStatsAgendaLoading] = useState(false);
 
   const isDarkTheme = theme === 'dark';
 
@@ -108,7 +212,13 @@ export default function HomeScreen({ authToken, onLogout }) {
         setProfilePhoto(savedPhoto);
       }
       const savedTab = globalThis?.localStorage?.getItem(ACTIVE_TAB_KEY);
-      if (savedTab === 'Kronometre' || savedTab === 'Gunluk' || savedTab === 'Ajanda' || savedTab === 'Ayarlar') {
+      if (
+        savedTab === 'Kronometre' ||
+        savedTab === 'Gunluk' ||
+        savedTab === 'Ajanda' ||
+        savedTab === 'Ayarlar' ||
+        savedTab === 'Istatistik'
+      ) {
         setActiveTab(savedTab);
       }
       const savedNotifications = globalThis?.localStorage?.getItem(NOTIFICATIONS_KEY);
@@ -154,6 +264,31 @@ export default function HomeScreen({ authToken, onLogout }) {
       globalThis?.localStorage?.setItem(NOTIFICATION_MINUTE_KEY, notificationMinute);
     }
   }, [notificationHour, notificationMinute]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(LOCAL_STATS_KEY);
+        if (cancelled || !raw) {
+          return;
+        }
+        const parsed = JSON.parse(raw);
+        if (cancelled) {
+          return;
+        }
+        setLocalStats({
+          stopwatchTotalMs: Math.max(0, Number(parsed.stopwatchTotalMs) || 0),
+          stopwatchPauseCount: Math.max(0, Number(parsed.stopwatchPauseCount) || 0),
+        });
+      } catch {
+        /* ignore corrupt storage */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const loadJournalEntries = async () => {
@@ -211,14 +346,70 @@ export default function HomeScreen({ authToken, onLogout }) {
     loadAgendaTasks();
   }, [authToken, onLogout, selectedAgendaDate]);
 
-  const screenContent = useMemo(() => {
-    if (activeTab === 'Kronometre') {
-      return {
-        title: 'Kronometre',
-        subtitle: 'Kronometre modulu yakinda burada olacak.',
-      };
+  useEffect(() => {
+    if (activeTab !== 'Ajanda' || agendaViewMode !== 'calendar' || !authToken) {
+      return;
     }
 
+    const loadAgendaMonthTasks = async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/agenda`, {
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+          },
+        });
+        const data = await response.json();
+        if (response.status === 401) {
+          onLogout?.();
+          return;
+        }
+        if (response.ok && Array.isArray(data)) {
+          setAgendaMonthTasks(data);
+        }
+      } catch (error) {
+        console.error('Ajanda takvim gorevleri yuklenemedi:', error);
+      }
+    };
+
+    loadAgendaMonthTasks();
+  }, [activeTab, agendaViewMode, authToken, onLogout]);
+
+  useEffect(() => {
+    if (activeTab !== 'Istatistik' || !authToken) {
+      return;
+    }
+
+    const loadAllAgendaForStats = async () => {
+      setStatsAgendaLoading(true);
+      try {
+        const response = await fetch(`${API_BASE_URL}/agenda`, {
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+          },
+        });
+        const data = await response.json();
+        if (response.status === 401) {
+          onLogout?.();
+          return;
+        }
+        if (response.ok && Array.isArray(data)) {
+          setStatsAgendaAll(data);
+        }
+      } catch (error) {
+        console.error('Istatistik ajanda yuklenemedi:', error);
+      } finally {
+        setStatsAgendaLoading(false);
+      }
+    };
+
+    loadAllAgendaForStats();
+  }, [activeTab, authToken, onLogout]);
+
+  useEffect(() => {
+    setAgendaCalendarMonthDate(getMonthStart(parseDateKey(selectedAgendaDate)));
+  }, [selectedAgendaDate]);
+
+  const screenContent = useMemo(() => {
     if (activeTab === 'Gunluk') {
       return {
         title: 'Gunluk',
@@ -237,6 +428,78 @@ export default function HomeScreen({ authToken, onLogout }) {
       subtitle: 'Ajanda gorunumu bu bolumde yer alacak.',
     };
   }, [activeTab]);
+
+  useEffect(() => {
+    if (!stopwatchRunning) {
+      return undefined;
+    }
+    const id = setInterval(() => {
+      setStopwatchRenderTick((n) => n + 1);
+    }, 100);
+    return () => clearInterval(id);
+  }, [stopwatchRunning]);
+
+  const stopwatchElapsedMs = useMemo(() => {
+    const segment =
+      stopwatchRunning && stopwatchSegmentStartRef.current != null
+        ? Date.now() - stopwatchSegmentStartRef.current
+        : 0;
+    return stopwatchAccumulatedRef.current + segment;
+  }, [stopwatchRunning, stopwatchRenderTick]);
+
+  const recordStopwatchPauseSegment = (segmentMs) => {
+    if (segmentMs < 200) {
+      return;
+    }
+    setLocalStats((prev) => {
+      const next = {
+        stopwatchTotalMs: prev.stopwatchTotalMs + segmentMs,
+        stopwatchPauseCount: prev.stopwatchPauseCount + 1,
+      };
+      persistLocalStats(next);
+      return next;
+    });
+  };
+
+  const recordStopwatchRunningSegmentOnReset = (segmentMs) => {
+    if (segmentMs < 200) {
+      return;
+    }
+    setLocalStats((prev) => {
+      const next = {
+        ...prev,
+        stopwatchTotalMs: prev.stopwatchTotalMs + segmentMs,
+      };
+      persistLocalStats(next);
+      return next;
+    });
+  };
+
+  const handleStopwatchPrimaryPress = () => {
+    if (stopwatchRunning) {
+      if (stopwatchSegmentStartRef.current != null) {
+        const segment = Date.now() - stopwatchSegmentStartRef.current;
+        stopwatchAccumulatedRef.current += segment;
+        recordStopwatchPauseSegment(segment);
+        stopwatchSegmentStartRef.current = null;
+      }
+      setStopwatchRunning(false);
+      return;
+    }
+    stopwatchSegmentStartRef.current = Date.now();
+    setStopwatchRunning(true);
+  };
+
+  const handleStopwatchResetPress = () => {
+    if (stopwatchRunning && stopwatchSegmentStartRef.current != null) {
+      const segment = Date.now() - stopwatchSegmentStartRef.current;
+      recordStopwatchRunningSegmentOnReset(segment);
+    }
+    stopwatchAccumulatedRef.current = 0;
+    stopwatchSegmentStartRef.current = null;
+    setStopwatchRunning(false);
+    setStopwatchRenderTick((n) => n + 1);
+  };
 
   const applyTheme = (nextTheme) => {
     setTheme(nextTheme);
@@ -269,6 +532,22 @@ export default function HomeScreen({ authToken, onLogout }) {
         tabJournal: 'Journal',
         tabAgenda: 'Agenda',
         tabSettings: 'Settings',
+        tabStats: 'Stats',
+        statScreenTitle: 'Statistics',
+        statJournalCard: 'Journal',
+        statJournalEntriesLabel: 'Saved entries',
+        statAgendaCard: 'Agenda',
+        statAgendaTotalLabel: 'All tasks',
+        statAgendaDoneLabel: 'Completed',
+        statChronoCard: 'Stopwatch (on device)',
+        statChronoTotalLabel: 'Total measured time',
+        statChronoPausesLabel: 'Pause events counted',
+        statPersistHint: 'Stopwatch totals stay on this device.',
+        statLoadingAgenda: 'Loading agenda…',
+        chronoStart: 'Start',
+        chronoPause: 'Pause',
+        chronoResume: 'Resume',
+        chronoReset: 'Reset',
       };
     }
     return {
@@ -293,6 +572,22 @@ export default function HomeScreen({ authToken, onLogout }) {
       tabJournal: 'Gunluk',
       tabAgenda: 'Ajanda',
       tabSettings: 'Ayarlar',
+      tabStats: 'Istatistik',
+      statScreenTitle: 'Istatistik',
+      statJournalCard: 'Gunluk',
+      statJournalEntriesLabel: 'Kayitli gunluk sayisi',
+      statAgendaCard: 'Ajanda',
+      statAgendaTotalLabel: 'Toplam gorev',
+      statAgendaDoneLabel: 'Tamamlanan',
+      statChronoCard: 'Kronometre (cihazda)',
+      statChronoTotalLabel: 'Toplam olculen sure',
+      statChronoPausesLabel: 'Sayilan duraklatma',
+      statPersistHint: 'Kronometre toplamlari bu cihazda saklanir.',
+      statLoadingAgenda: 'Ajanda yukleniyor...',
+      chronoStart: 'Basla',
+      chronoPause: 'Duraklat',
+      chronoResume: 'Devam',
+      chronoReset: 'Sifirla',
     };
   }, [language]);
 
@@ -378,6 +673,13 @@ export default function HomeScreen({ authToken, onLogout }) {
         await Notifications.cancelAllScheduledNotificationsAsync();
       }
       setNotificationsEnabled(false);
+      return;
+    }
+
+    // Expo scheduled notifications are not set up on web (`setDailyReminder` returns false
+    // there); still persist the user's choice so the toggle and reminder time save correctly.
+    if (Platform.OS === 'web') {
+      setNotificationsEnabled(true);
       return;
     }
 
@@ -549,6 +851,7 @@ export default function HomeScreen({ authToken, onLogout }) {
       }
 
       setAgendaTasks((prev) => [...prev, data]);
+      setAgendaMonthTasks((prev) => [...prev, data]);
       setAgendaTaskText('');
     } catch (error) {
       console.error('Ajanda gorevi kaydedilemedi:', error);
@@ -592,11 +895,81 @@ export default function HomeScreen({ authToken, onLogout }) {
       }
 
       setAgendaTasks((prev) => prev.filter((task) => Number(task.id) !== id));
+      setAgendaMonthTasks((prev) => prev.filter((task) => Number(task.id) !== id));
     } catch (error) {
       console.error('Ajanda gorevi silinemedi:', error);
       Alert.alert('Hata', 'Sunucuya baglanirken bir sorun olustu.');
     }
   };
+
+  const toggleAgendaTaskCompleted = async (taskId, completed) => {
+    if (!authToken) {
+      return;
+    }
+
+    const id = Number(taskId);
+    if (!Number.isFinite(id)) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/agenda/${id}/status`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({ completed }),
+      });
+      const data = await response.json();
+
+      if (response.status === 401) {
+        onLogout?.();
+        return;
+      }
+      if (!response.ok) {
+        Alert.alert('Hata', data.detail || 'Gorev durumu guncellenemedi.');
+        return;
+      }
+
+      setAgendaTasks((prev) => prev.map((task) => (Number(task.id) === id ? data : task)));
+      setAgendaMonthTasks((prev) => prev.map((task) => (Number(task.id) === id ? data : task)));
+    } catch (error) {
+      console.error('Ajanda gorevi durumu guncellenemedi:', error);
+      Alert.alert('Hata', 'Sunucuya baglanirken bir sorun olustu.');
+    }
+  };
+
+  const agendaCalendarCells = useMemo(() => {
+    const selectedMonth = agendaCalendarMonthDate.getMonth();
+    const selectedYear = agendaCalendarMonthDate.getFullYear();
+    const monthTasksByDate = agendaMonthTasks.reduce((acc, task) => {
+      if (typeof task?.task_date !== 'string') {
+        return acc;
+      }
+      const parsedTaskDate = parseDateKey(task.task_date);
+      if (parsedTaskDate.getMonth() !== selectedMonth || parsedTaskDate.getFullYear() !== selectedYear) {
+        return acc;
+      }
+      if (!acc[task.task_date]) {
+        acc[task.task_date] = [];
+      }
+      acc[task.task_date].push(task);
+      return acc;
+    }, {});
+
+    return getMonthGridDays(agendaCalendarMonthDate).map((dateValue) => {
+      const dateKey = toDateKey(dateValue);
+      const dayTasks = monthTasksByDate[dateKey] || [];
+      return {
+        key: dateKey,
+        dayNumber: dateValue.getDate(),
+        inCurrentMonth:
+          dateValue.getMonth() === selectedMonth && dateValue.getFullYear() === selectedYear,
+        taskPreview: dayTasks.slice(0, 3),
+      };
+    });
+  }, [agendaCalendarMonthDate, agendaMonthTasks]);
 
   const askDeleteAgendaTask = (taskId) => {
     const runDelete = () => deleteAgendaTask(taskId);
@@ -628,21 +1001,59 @@ export default function HomeScreen({ authToken, onLogout }) {
     agendaDateScrollXRef.current = event?.nativeEvent?.contentOffset?.x || 0;
   };
 
+  useEffect(() => {
+    const stripDateKeys = new Set(agendaDateStrip.map((item) => item.key));
+    if (stripDateKeys.has(selectedAgendaDate)) {
+      return;
+    }
+
+    const selectedDate = parseDateKey(selectedAgendaDate);
+    const dayDiff = Math.round((selectedDate.getTime() - todayRef.current.getTime()) / (1000 * 60 * 60 * 24));
+    setAgendaStripStartOffset(dayDiff - 7);
+  }, [agendaDateStrip, selectedAgendaDate]);
+
+  useEffect(() => {
+    if (!agendaDateStrip.length) {
+      return;
+    }
+
+    const selectedIndex = agendaDateStrip.findIndex((item) => item.key === selectedAgendaDate);
+    if (selectedIndex < 0) {
+      return;
+    }
+
+    const pillWidth = 64;
+    const pillGap = 10;
+    const contentPaddingLeft = 40;
+    const selectedPillCenterX = contentPaddingLeft + (selectedIndex * (pillWidth + pillGap)) + (pillWidth / 2);
+    const viewportHalf = agendaStripViewportWidth > 0 ? agendaStripViewportWidth / 2 : 120;
+    const targetOffset = Math.max(0, selectedPillCenterX - viewportHalf);
+
+    agendaDateScrollRef.current?.scrollTo({ x: targetOffset, animated: true });
+  }, [agendaDateStrip, selectedAgendaDate, agendaStripViewportWidth]);
+
+  const shiftSelectedAgendaDate = (amount) => {
+    setSelectedAgendaDate((prevDateKey) => toDateKey(addDays(parseDateKey(prevDateKey), amount)));
+  };
+
   const scrollAgendaDateStripRight = () => {
-    const nextOffset = agendaDateScrollXRef.current + 140;
-    agendaDateScrollRef.current?.scrollTo({ x: nextOffset, animated: true });
+    shiftSelectedAgendaDate(1);
   };
 
   const scrollAgendaDateStripLeft = () => {
-    const nextOffset = Math.max(0, agendaDateScrollXRef.current - 140);
-    agendaDateScrollRef.current?.scrollTo({ x: nextOffset, animated: true });
+    shiftSelectedAgendaDate(-1);
   };
+
+  const statsAgendaCompleted = useMemo(
+    () => statsAgendaAll.filter((task) => Boolean(task.completed)).length,
+    [statsAgendaAll],
+  );
 
   return (
     <GestureHandlerRootView style={styles.gestureRoot}>
     <SafeAreaView style={[styles.container, { backgroundColor: palette.pageBg }]}>
       <StatusBar barStyle={isDarkTheme ? 'light-content' : 'dark-content'} backgroundColor={palette.pageBg} />
-      <View style={[styles.content, (activeTab === 'Ayarlar' || activeTab === 'Ajanda') && styles.contentSettings]}>
+      <View style={[styles.content, (activeTab === 'Ayarlar' || activeTab === 'Ajanda' || activeTab === 'Kronometre' || activeTab === 'Istatistik') && styles.contentSettings]}>
         {activeTab === 'Gunluk' ? (
           <View style={styles.journalLayout}>
             <View style={[styles.journalSidebar, { backgroundColor: palette.cardBg, borderColor: palette.border }]}>
@@ -668,12 +1079,6 @@ export default function HomeScreen({ authToken, onLogout }) {
                   ))
                 )}
               </ScrollView>
-              <TouchableOpacity
-                style={styles.sidebarLogoutButton}
-                onPress={onLogout}
-              >
-                <Text style={styles.sidebarLogoutButtonText}>Cikis Yap</Text>
-              </TouchableOpacity>
             </View>
 
             <View style={[styles.notebookContainer, { backgroundColor: isDarkTheme ? '#1F2937' : '#FFFDF6' }]}>
@@ -701,51 +1106,180 @@ export default function HomeScreen({ authToken, onLogout }) {
           </View>
         ) : activeTab === 'Ajanda' ? (
           <View style={styles.agendaLayout}>
-            <View style={[styles.agendaDateStripWrap, { borderColor: palette.border, backgroundColor: palette.cardBg }]}>
-              <ScrollView
-                ref={agendaDateScrollRef}
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.agendaDateStripContent}
-                onScroll={handleAgendaDateStripScroll}
-                scrollEventThrottle={16}
-              >
-                {agendaDateStrip.map((dateItem) => {
-                  const isActive = selectedAgendaDate === dateItem.key;
-                  return (
-                    <TouchableOpacity
-                      key={dateItem.key}
-                      style={[
-                        styles.agendaDatePill,
-                        {
-                          borderColor: isActive ? '#F59E0B' : palette.border,
-                          backgroundColor: isActive ? '#FDE7C0' : isDarkTheme ? '#243244' : '#FFF8E8',
-                        },
-                      ]}
-                      onPress={() => setSelectedAgendaDate(dateItem.key)}
-                      activeOpacity={0.85}
-                    >
-                      <Text style={[styles.agendaDateDay, { color: palette.textPrimary }]}>{dateItem.dayShort}</Text>
-                      <Text style={[styles.agendaDateNumber, { color: palette.textPrimary }]}>{dateItem.dayNumber}</Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </ScrollView>
+            <View style={styles.agendaViewSwitchRow}>
               <TouchableOpacity
-                style={[styles.agendaDateStripArrowHint, styles.agendaDateStripArrowHintLeft]}
-                onPress={scrollAgendaDateStripLeft}
+                style={[
+                  styles.agendaViewSwitchButton,
+                  {
+                    borderColor: palette.border,
+                    backgroundColor: agendaViewMode === 'list' ? '#F59E0B' : (isDarkTheme ? '#1E293B' : '#FFF8E8'),
+                  },
+                ]}
+                onPress={() => setAgendaViewMode('list')}
                 activeOpacity={0.85}
               >
-                <Ionicons name="chevron-back" size={18} color="#E67E22" />
+                <Ionicons name="list-outline" size={15} color={agendaViewMode === 'list' ? '#FFFFFF' : palette.textPrimary} />
+                <Text style={[styles.agendaViewSwitchText, { color: agendaViewMode === 'list' ? '#FFFFFF' : palette.textPrimary }]}>Liste</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={[styles.agendaDateStripArrowHint, styles.agendaDateStripArrowHintRight]}
-                onPress={scrollAgendaDateStripRight}
+                style={[
+                  styles.agendaViewSwitchButton,
+                  {
+                    borderColor: palette.border,
+                    backgroundColor: agendaViewMode === 'calendar' ? '#F59E0B' : (isDarkTheme ? '#1E293B' : '#FFF8E8'),
+                  },
+                ]}
+                onPress={() => setAgendaViewMode('calendar')}
                 activeOpacity={0.85}
               >
-                <Ionicons name="chevron-forward" size={18} color="#E67E22" />
+                <Ionicons name="calendar-outline" size={15} color={agendaViewMode === 'calendar' ? '#FFFFFF' : palette.textPrimary} />
+                <Text style={[styles.agendaViewSwitchText, { color: agendaViewMode === 'calendar' ? '#FFFFFF' : palette.textPrimary }]}>Takvim</Text>
               </TouchableOpacity>
             </View>
+
+            {agendaViewMode === 'list' ? (
+              <View
+                style={[styles.agendaDateStripWrap, { borderColor: palette.border, backgroundColor: palette.cardBg }]}
+                onLayout={(event) => {
+                  const width = event?.nativeEvent?.layout?.width || 0;
+                  setAgendaStripViewportWidth(width);
+                }}
+              >
+                <ScrollView
+                  ref={agendaDateScrollRef}
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.agendaDateStripContent}
+                  onScroll={handleAgendaDateStripScroll}
+                  scrollEventThrottle={16}
+                >
+                  {agendaDateStrip.map((dateItem) => {
+                    const isActive = selectedAgendaDate === dateItem.key;
+                    return (
+                      <TouchableOpacity
+                        key={dateItem.key}
+                        style={[
+                          styles.agendaDatePill,
+                          {
+                            borderColor: isActive ? '#F59E0B' : palette.border,
+                            backgroundColor: isActive ? '#FDE7C0' : isDarkTheme ? '#243244' : '#FFF8E8',
+                          },
+                        ]}
+                        onPress={() => setSelectedAgendaDate(dateItem.key)}
+                        activeOpacity={0.85}
+                      >
+                        <Text style={[styles.agendaDateDay, { color: palette.textPrimary }]}>{dateItem.dayShort}</Text>
+                        <Text style={[styles.agendaDateNumber, { color: palette.textPrimary }]}>{dateItem.dayNumber}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+                <TouchableOpacity
+                  style={[styles.agendaDateStripArrowHint, styles.agendaDateStripArrowHintLeft]}
+                  onPress={scrollAgendaDateStripLeft}
+                  activeOpacity={0.85}
+                >
+                  <Ionicons name="chevron-back" size={18} color="#E67E22" />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.agendaDateStripArrowHint, styles.agendaDateStripArrowHintRight]}
+                  onPress={scrollAgendaDateStripRight}
+                  activeOpacity={0.85}
+                >
+                  <Ionicons name="chevron-forward" size={18} color="#E67E22" />
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <View style={[styles.agendaCalendarCard, { borderColor: palette.border, backgroundColor: palette.cardBg }]}>
+                <View style={styles.agendaCalendarHeader}>
+                  <TouchableOpacity
+                    style={[styles.agendaCalendarMonthNavButton, { borderColor: palette.border }]}
+                    onPress={() => setAgendaCalendarMonthDate((prev) => new Date(prev.getFullYear(), prev.getMonth() - 1, 1))}
+                    activeOpacity={0.85}
+                  >
+                    <Ionicons name="chevron-back" size={16} color={palette.textPrimary} />
+                  </TouchableOpacity>
+                  <Text style={[styles.agendaCalendarMonthTitle, { color: palette.textPrimary }]}>
+                    {agendaCalendarMonthDate.toLocaleDateString(language === 'en' ? 'en-US' : 'tr-TR', {
+                      month: 'long',
+                      year: 'numeric',
+                    })}
+                  </Text>
+                  <TouchableOpacity
+                    style={[styles.agendaCalendarMonthNavButton, { borderColor: palette.border }]}
+                    onPress={() => setAgendaCalendarMonthDate((prev) => new Date(prev.getFullYear(), prev.getMonth() + 1, 1))}
+                    activeOpacity={0.85}
+                  >
+                    <Ionicons name="chevron-forward" size={16} color={palette.textPrimary} />
+                  </TouchableOpacity>
+                </View>
+                <View style={styles.agendaCalendarWeekRow}>
+                  {['Pzt', 'Sal', 'Car', 'Per', 'Cum', 'Cmt', 'Paz'].map((weekDay) => (
+                    <Text key={weekDay} style={[styles.agendaCalendarWeekDay, { color: palette.textSecondary }]}>
+                      {weekDay}
+                    </Text>
+                  ))}
+                </View>
+                <View style={styles.agendaCalendarGrid}>
+                  {agendaCalendarCells.map((cell) => {
+                    const isSelected = selectedAgendaDate === cell.key;
+                    return (
+                      <TouchableOpacity
+                        key={cell.key}
+                        style={[
+                          styles.agendaCalendarDayCell,
+                          {
+                            borderColor: isSelected ? '#F59E0B' : palette.border,
+                            backgroundColor: isSelected ? '#FDE7C0' : (isDarkTheme ? '#1E293B' : '#FFFFFF'),
+                            opacity: cell.inCurrentMonth ? 1 : 0.45,
+                          },
+                        ]}
+                        onPress={() => setSelectedAgendaDate(cell.key)}
+                        activeOpacity={0.85}
+                      >
+                        <Text style={[styles.agendaCalendarDayNumber, { color: palette.textPrimary }]}>{cell.dayNumber}</Text>
+                        <View style={styles.agendaCalendarTaskSlots}>
+                          {Array.from({ length: 3 }).map((_, slotIndex) => {
+                            const previewTask = cell.taskPreview[slotIndex];
+                            return (
+                              <View
+                                key={`${cell.key}-slot-${slotIndex}`}
+                                style={[
+                                  styles.agendaCalendarTaskSlot,
+                                  {
+                                    borderColor: previewTask?.color || palette.border,
+                                    backgroundColor: previewTask
+                                      ? (
+                                        previewTask.completed
+                                          ? toColorWithAlpha(previewTask.color, 0.2)
+                                          : toColorWithAlpha(previewTask.color, isDarkTheme ? 0.36 : 0.24)
+                                      )
+                                      : 'transparent',
+                                  },
+                                ]}
+                              >
+                                {previewTask ? (
+                                  <Text
+                                    numberOfLines={1}
+                                    style={[
+                                      styles.agendaCalendarTaskSlotText,
+                                      { color: palette.textPrimary },
+                                      previewTask.completed && styles.agendaCalendarTaskSlotTextCompleted,
+                                    ]}
+                                  >
+                                    {previewTask.content}
+                                  </Text>
+                                ) : null}
+                              </View>
+                            );
+                          })}
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+            )}
 
             <View style={[styles.agendaTasksCard, { borderColor: palette.border, backgroundColor: palette.cardBg }]}>
               <Text style={[styles.agendaTasksTitle, { color: palette.textPrimary }]}>
@@ -776,7 +1310,30 @@ export default function HomeScreen({ authToken, onLogout }) {
                       <View style={[styles.agendaTaskRow, { borderColor: palette.border, backgroundColor: isDarkTheme ? '#1E293B' : '#FFFDF5' }]}>
                         <View style={[styles.agendaTaskColorStripe, { backgroundColor: task.color || '#EF4444' }]} />
                         <View style={styles.agendaTaskBody}>
-                          <Text style={[styles.agendaTaskText, { color: palette.textPrimary }]}>{task.content}</Text>
+                          <View style={styles.agendaTaskMain}>
+                            <TouchableOpacity
+                              style={[
+                                styles.agendaTaskCheckButton,
+                                {
+                                  borderColor: task.completed ? '#22C55E' : palette.border,
+                                  backgroundColor: task.completed ? '#DCFCE7' : (isDarkTheme ? '#1E293B' : '#FFFFFF'),
+                                },
+                              ]}
+                              onPress={() => toggleAgendaTaskCompleted(task.id, !task.completed)}
+                              activeOpacity={0.85}
+                            >
+                              {task.completed ? <Ionicons name="checkmark" size={14} color="#15803D" /> : null}
+                            </TouchableOpacity>
+                            <Text
+                              style={[
+                                styles.agendaTaskText,
+                                { color: palette.textPrimary },
+                                task.completed && styles.agendaTaskTextCompleted,
+                              ]}
+                            >
+                              {task.content}
+                            </Text>
+                          </View>
                           <View style={styles.agendaTaskActions}>
                             <View style={[styles.agendaTaskColorBadge, { backgroundColor: task.color || '#EF4444' }]} />
                             <View style={[styles.agendaSwipeHintBadge, { backgroundColor: isDarkTheme ? '#7F1D1D' : '#FEE2E2' }]}>
@@ -1036,13 +1593,125 @@ export default function HomeScreen({ authToken, onLogout }) {
               </View>
             </View>
           </ScrollView>
+        ) : activeTab === 'Kronometre' ? (
+          <View style={styles.chronometerLayout}>
+            <View style={[styles.chronometerCard, { borderColor: palette.border, backgroundColor: palette.cardBg }]}>
+              <Text style={[styles.chronometerTime, { color: palette.textPrimary }]}>
+                {formatStopwatchDisplay(stopwatchElapsedMs)}
+              </Text>
+              <View style={styles.chronometerButtonsRow}>
+                <TouchableOpacity
+                  style={[
+                    styles.chronometerPrimaryButton,
+                    {
+                      backgroundColor: stopwatchRunning ? palette.settingsInputBg : '#E8A24D',
+                      borderColor: stopwatchRunning ? palette.border : '#D97706',
+                    },
+                  ]}
+                  onPress={handleStopwatchPrimaryPress}
+                  activeOpacity={0.88}
+                >
+                  <Ionicons
+                    name={stopwatchRunning ? 'pause' : 'play'}
+                    size={18}
+                    color={stopwatchRunning ? palette.textPrimary : '#FFFFFF'}
+                  />
+                  <Text
+                    style={[
+                      styles.chronometerPrimaryButtonText,
+                      { color: stopwatchRunning ? palette.textPrimary : '#FFFFFF' },
+                    ]}
+                  >
+                    {stopwatchRunning ? t.chronoPause : stopwatchElapsedMs > 0 ? t.chronoResume : t.chronoStart}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.chronometerSecondaryButton,
+                    {
+                      borderColor: palette.border,
+                      backgroundColor: palette.settingsInputBg,
+                      opacity: stopwatchRunning || stopwatchElapsedMs > 0 ? 1 : 0.45,
+                    },
+                  ]}
+                  onPress={handleStopwatchResetPress}
+                  disabled={!stopwatchRunning && stopwatchElapsedMs === 0}
+                  activeOpacity={0.88}
+                >
+                  <Ionicons name="refresh" size={17} color={palette.textPrimary} />
+                  <Text style={[styles.chronometerSecondaryButtonText, { color: palette.textPrimary }]}>{t.chronoReset}</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        ) : activeTab === 'Istatistik' ? (
+          <ScrollView
+            style={styles.statsLayout}
+            contentContainerStyle={[
+              styles.statsScrollContent,
+              { paddingBottom: Math.max(32, Math.round(windowHeight * 0.06)) },
+            ]}
+            showsVerticalScrollIndicator={false}
+          >
+            <Text style={[styles.statsScreenTitle, { color: palette.textPrimary }]}>{t.statScreenTitle}</Text>
+            {statsAgendaLoading ? (
+              <View style={styles.statsLoadingRow}>
+                <ActivityIndicator color="#E8A24D" />
+                <Text style={[styles.statsLoadingText, { color: palette.textSecondary }]}>{t.statLoadingAgenda}</Text>
+              </View>
+            ) : null}
+
+            <View style={[styles.statsCard, { borderColor: palette.border, backgroundColor: palette.cardBg }]}>
+              <View style={styles.statsCardHeader}>
+                <Ionicons name="book-outline" size={20} color="#E8A24D" />
+                <Text style={[styles.statsCardTitle, { color: palette.textPrimary }]}>{t.statJournalCard}</Text>
+              </View>
+              <View style={[styles.statsRow, { borderTopColor: palette.border }]}>
+                <Text style={[styles.statsRowLabel, { color: palette.textSecondary }]}>{t.statJournalEntriesLabel}</Text>
+                <Text style={[styles.statsRowValue, { color: palette.textPrimary }]}>{journalEntries.length}</Text>
+              </View>
+            </View>
+
+            <View style={[styles.statsCard, { borderColor: palette.border, backgroundColor: palette.cardBg }]}>
+              <View style={styles.statsCardHeader}>
+                <Ionicons name="calendar-outline" size={20} color="#E8A24D" />
+                <Text style={[styles.statsCardTitle, { color: palette.textPrimary }]}>{t.statAgendaCard}</Text>
+              </View>
+              <View style={[styles.statsRow, { borderTopColor: palette.border }]}>
+                <Text style={[styles.statsRowLabel, { color: palette.textSecondary }]}>{t.statAgendaTotalLabel}</Text>
+                <Text style={[styles.statsRowValue, { color: palette.textPrimary }]}>{statsAgendaAll.length}</Text>
+              </View>
+              <View style={[styles.statsRow, { borderTopColor: palette.border }]}>
+                <Text style={[styles.statsRowLabel, { color: palette.textSecondary }]}>{t.statAgendaDoneLabel}</Text>
+                <Text style={[styles.statsRowValue, { color: palette.textPrimary }]}>{statsAgendaCompleted}</Text>
+              </View>
+            </View>
+
+            <View style={[styles.statsCard, { borderColor: palette.border, backgroundColor: palette.cardBg }]}>
+              <View style={styles.statsCardHeader}>
+                <Ionicons name="timer-outline" size={20} color="#E8A24D" />
+                <Text style={[styles.statsCardTitle, { color: palette.textPrimary }]}>{t.statChronoCard}</Text>
+              </View>
+              <View style={[styles.statsRow, { borderTopColor: palette.border }]}>
+                <Text style={[styles.statsRowLabel, { color: palette.textSecondary }]}>{t.statChronoTotalLabel}</Text>
+                <Text style={[styles.statsRowValue, { color: palette.textPrimary }]}>
+                  {formatHumanDuration(localStats.stopwatchTotalMs, language)}
+                </Text>
+              </View>
+              <View style={[styles.statsRow, { borderTopColor: palette.border }]}>
+                <Text style={[styles.statsRowLabel, { color: palette.textSecondary }]}>{t.statChronoPausesLabel}</Text>
+                <Text style={[styles.statsRowValue, { color: palette.textPrimary }]}>{localStats.stopwatchPauseCount}</Text>
+              </View>
+              <Text style={[styles.statsFootnote, { color: palette.textSecondary }]}>{t.statPersistHint}</Text>
+            </View>
+          </ScrollView>
         ) : (
           <>
             <Text style={[styles.title, { color: palette.textPrimary }]}>{screenContent.title}</Text>
             <Text style={[styles.subtitle, { color: palette.textSecondary }]}>{screenContent.subtitle}</Text>
           </>
         )}
-        {activeTab !== 'Gunluk' && activeTab !== 'Ayarlar' && activeTab !== 'Ajanda' && (
+        {activeTab !== 'Gunluk' && activeTab !== 'Ayarlar' && activeTab !== 'Ajanda' && activeTab !== 'Kronometre' && activeTab !== 'Istatistik' && (
           <TouchableOpacity
             style={styles.logoutButton}
             onPress={onLogout}
@@ -1125,6 +1794,31 @@ export default function HomeScreen({ authToken, onLogout }) {
             minimumFontScale={0.7}
           >
             {t.tabAgenda}
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[
+            styles.tabButton,
+            { backgroundColor: palette.tabBg },
+            activeTab === 'Istatistik' && styles.tabButtonActive,
+            activeTab === 'Istatistik' && { backgroundColor: palette.tabActiveBg },
+          ]}
+          onPress={() => setActiveTab('Istatistik')}
+        >
+          <Ionicons
+            name="stats-chart-outline"
+            size={18}
+            style={styles.tabIcon}
+            color={activeTab === 'Istatistik' ? palette.tabTextActive : palette.tabText}
+          />
+          <Text
+            style={[styles.tabText, { color: palette.tabText }, activeTab === 'Istatistik' && { color: palette.tabTextActive }]}
+            numberOfLines={1}
+            adjustsFontSizeToFit
+            minimumFontScale={0.65}
+          >
+            {t.tabStats}
           </Text>
         </TouchableOpacity>
 
@@ -1256,12 +1950,223 @@ const styles = StyleSheet.create({
     gap: 12,
     marginBottom: 12,
   },
+  chronometerLayout: {
+    width: '100%',
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  chronometerCard: {
+    borderWidth: 1,
+    borderRadius: 16,
+    paddingVertical: 28,
+    paddingHorizontal: 20,
+    alignItems: 'center',
+    gap: 22,
+  },
+  chronometerTime: {
+    fontSize: 44,
+    fontVariant: ['tabular-nums'],
+    fontWeight: '700',
+    letterSpacing: 1,
+  },
+  chronometerButtonsRow: {
+    flexDirection: 'row',
+    gap: 12,
+    width: '100%',
+    justifyContent: 'center',
+    flexWrap: 'wrap',
+  },
+  chronometerPrimaryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 14,
+    paddingHorizontal: 22,
+    borderRadius: 14,
+    borderWidth: 1,
+    minWidth: 148,
+  },
+  chronometerPrimaryButtonText: {
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  chronometerSecondaryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 14,
+    borderWidth: 1,
+    minWidth: 132,
+  },
+  chronometerSecondaryButtonText: {
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  statsLayout: {
+    width: '100%',
+    flex: 1,
+  },
+  statsScrollContent: {
+    gap: 14,
+    paddingTop: 4,
+  },
+  statsScreenTitle: {
+    fontSize: 24,
+    fontWeight: '800',
+    marginBottom: 4,
+  },
+  statsLoadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 4,
+  },
+  statsLoadingText: {
+    fontSize: 14,
+  },
+  statsCard: {
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    gap: 0,
+  },
+  statsCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  statsCardTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  statsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  statsRowLabel: {
+    fontSize: 14,
+    flex: 1,
+    paddingRight: 10,
+  },
+  statsRowValue: {
+    fontSize: 18,
+    fontWeight: '800',
+    fontVariant: ['tabular-nums'],
+  },
+  statsFootnote: {
+    fontSize: 12,
+    marginTop: 8,
+    lineHeight: 17,
+  },
+  agendaViewSwitchRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  agendaViewSwitchButton: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingVertical: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 6,
+  },
+  agendaViewSwitchText: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
   agendaDateStripWrap: {
     borderWidth: 1,
     borderRadius: 16,
     paddingVertical: 12,
     paddingHorizontal: 10,
     position: 'relative',
+  },
+  agendaCalendarCard: {
+    borderWidth: 1,
+    borderRadius: 16,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    gap: 8,
+  },
+  agendaCalendarHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  agendaCalendarMonthNavButton: {
+    width: 30,
+    height: 30,
+    borderRadius: 999,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  agendaCalendarMonthTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    textTransform: 'capitalize',
+  },
+  agendaCalendarWeekRow: {
+    flexDirection: 'row',
+  },
+  agendaCalendarWeekDay: {
+    flex: 1,
+    textAlign: 'center',
+    fontSize: 11,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+  },
+  agendaCalendarGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  agendaCalendarDayCell: {
+    width: '14.2857%',
+    minHeight: 90,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingVertical: 6,
+    paddingHorizontal: 4,
+    marginBottom: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  agendaCalendarDayNumber: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  agendaCalendarTaskSlots: {
+    width: '100%',
+    marginTop: 4,
+    gap: 3,
+  },
+  agendaCalendarTaskSlot: {
+    width: '100%',
+    minHeight: 16,
+    borderWidth: 1,
+    borderRadius: 4,
+    paddingHorizontal: 2,
+    justifyContent: 'center',
+  },
+  agendaCalendarTaskSlotText: {
+    fontSize: 9,
+    fontWeight: '600',
+  },
+  agendaCalendarTaskSlotTextCompleted: {
+    textDecorationLine: 'line-through',
+    opacity: 0.7,
   },
   agendaDateStripArrowHint: {
     position: 'absolute',
@@ -1341,6 +2246,21 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 12,
   },
+  agendaTaskMain: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  agendaTaskCheckButton: {
+    width: 22,
+    height: 22,
+    borderRadius: 999,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
   agendaTaskActions: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1350,6 +2270,10 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 14,
     lineHeight: 20,
+  },
+  agendaTaskTextCompleted: {
+    textDecorationLine: 'line-through',
+    opacity: 0.65,
   },
   agendaTaskColorBadge: {
     width: 16,
@@ -1455,21 +2379,6 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     paddingBottom: 12,
     gap: 8,
-  },
-  sidebarLogoutButton: {
-    marginTop: 8,
-    alignSelf: 'stretch',
-    backgroundColor: '#FEE2E2',
-    borderWidth: 1,
-    borderColor: '#EF4444',
-    borderRadius: 9,
-    paddingVertical: 8,
-    alignItems: 'center',
-  },
-  sidebarLogoutButtonText: {
-    color: '#B91C1C',
-    fontSize: 12,
-    fontWeight: '800',
   },
   entryCard: {
     backgroundColor: '#FFF8E6',

@@ -42,8 +42,51 @@ def ensure_agenda_completed_column():
         conn.close()
 
 
+def ensure_journal_photo_column():
+    conn = sqlite3.connect("agenda.db")
+    try:
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(journal_entries)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "photo" not in columns:
+            cursor.execute("ALTER TABLE journal_entries ADD COLUMN photo TEXT")
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def ensure_journal_photo_offset_columns():
+    conn = sqlite3.connect("agenda.db")
+    try:
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(journal_entries)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "photo_offset_x" not in columns:
+            cursor.execute("ALTER TABLE journal_entries ADD COLUMN photo_offset_x INTEGER NOT NULL DEFAULT 0")
+            conn.commit()
+        if "photo_offset_y" not in columns:
+            cursor.execute("ALTER TABLE journal_entries ADD COLUMN photo_offset_y INTEGER NOT NULL DEFAULT 0")
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def normalize_journal_payload(entry: schemas.JournalEntryCreate) -> tuple[str, str | None, int, int]:
+    content = (entry.content or "").strip()
+    photo = (entry.photo or "").strip() or None
+    if not content and not photo:
+        raise HTTPException(status_code=400, detail="Gunluk metni veya fotograf gerekli.")
+    if photo and len(photo) > 2_500_000:
+        raise HTTPException(status_code=400, detail="Fotograf cok buyuk. Daha kucuk bir gorsel secin.")
+    photo_offset_x = max(0, int(entry.photo_offset_x or 0)) if photo else 0
+    photo_offset_y = max(0, int(entry.photo_offset_y or 0)) if photo else 0
+    return content, photo, photo_offset_x, photo_offset_y
+
+
 ensure_journal_user_column()
 ensure_agenda_completed_column()
+ensure_journal_photo_column()
+ensure_journal_photo_offset_columns()
 
 app.add_middleware(
     CORSMiddleware,
@@ -174,11 +217,15 @@ def create_journal_entry(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    content = entry.content.strip()
-    if not content:
-        raise HTTPException(status_code=400, detail="Gunluk icerigi bos olamaz.")
+    content, photo, photo_offset_x, photo_offset_y = normalize_journal_payload(entry)
 
-    new_entry = models.JournalEntry(content=content, user_id=current_user.id)
+    new_entry = models.JournalEntry(
+        content=content,
+        photo=photo,
+        photo_offset_x=photo_offset_x,
+        photo_offset_y=photo_offset_y,
+        user_id=current_user.id,
+    )
     db.add(new_entry)
     db.commit()
     db.refresh(new_entry)
@@ -192,9 +239,7 @@ def update_journal_entry(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    content = entry.content.strip()
-    if not content:
-        raise HTTPException(status_code=400, detail="Gunluk icerigi bos olamaz.")
+    content, photo, photo_offset_x, photo_offset_y = normalize_journal_payload(entry)
 
     journal_entry = (
         db.query(models.JournalEntry)
@@ -205,6 +250,9 @@ def update_journal_entry(
         raise HTTPException(status_code=404, detail="Gunluk kaydi bulunamadi.")
 
     journal_entry.content = content
+    journal_entry.photo = photo
+    journal_entry.photo_offset_x = photo_offset_x
+    journal_entry.photo_offset_y = photo_offset_y
     db.commit()
     db.refresh(journal_entry)
     return journal_entry

@@ -17,6 +17,9 @@ class JournalEntry(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     content = Column(Text, nullable=False)
+    photo = Column(Text, nullable=True)
+    photo_offset_x = Column(Integer, nullable=False, default=0)
+    photo_offset_y = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 

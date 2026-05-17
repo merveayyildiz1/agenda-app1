@@ -28,12 +28,18 @@ class Token(BaseModel):
 
 
 class JournalEntryCreate(BaseModel):
-    content: str
+    content: str = ""
+    photo: str | None = None
+    photo_offset_x: int = 0
+    photo_offset_y: int = 0
 
 
 class JournalEntryOut(BaseModel):
     id: int
     content: str
+    photo: str | None = None
+    photo_offset_x: int = 0
+    photo_offset_y: int = 0
     created_at: datetime
 
     class Config:

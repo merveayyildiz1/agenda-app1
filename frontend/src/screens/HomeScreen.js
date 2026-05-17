@@ -1,8 +1,23 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, StyleSheet, SafeAreaView, TouchableOpacity, StatusBar, TextInput, ScrollView, Platform, Alert, Image, useWindowDimensions, ActivityIndicator } from 'react-native';
+import {
+  View,
+  Text,
+  StyleSheet,
+  SafeAreaView,
+  TouchableOpacity,
+  StatusBar,
+  TextInput,
+  ScrollView,
+  Platform,
+  Alert,
+  Image,
+  useWindowDimensions,
+  ActivityIndicator,
+  PanResponder,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Notifications from 'expo-notifications';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as ImagePicker from 'expo-image-picker';
 import { GestureHandlerRootView, RectButton, Swipeable } from 'react-native-gesture-handler';
 import { API_BASE_URL } from '../config/api';
 
@@ -13,43 +28,26 @@ const NOTIFICATIONS_KEY = 'agenda_notifications_enabled';
 const LANGUAGE_KEY = 'agenda_language';
 const NOTIFICATION_HOUR_KEY = 'agenda_notification_hour';
 const NOTIFICATION_MINUTE_KEY = 'agenda_notification_minute';
-const LOCAL_STATS_KEY = 'agenda_local_stats_v1';
+const MAX_JOURNAL_PHOTO_LENGTH = 2_500_000;
+const JOURNAL_PHOTO_WIDTH = 160;
+const JOURNAL_PHOTO_HEIGHT = 120;
+const JOURNAL_PHOTO_BOTTOM_RESERVED = 52;
+const DEFAULT_JOURNAL_PHOTO_OFFSET = { x: 12, y: 52 };
 
-const defaultLocalStats = () => ({
-  stopwatchTotalMs: 0,
-  stopwatchPauseCount: 0,
-});
-
-const persistLocalStats = async (next) => {
-  try {
-    await AsyncStorage.setItem(LOCAL_STATS_KEY, JSON.stringify(next));
-  } catch (error) {
-    console.warn('Local stats write failed:', error);
+const clampJournalPhotoOffset = (x, y, wrapWidth, wrapHeight) => {
+  if (!wrapWidth || !wrapHeight) {
+    return { x: Math.max(0, Math.round(x)), y: Math.max(0, Math.round(y)) };
   }
+  const maxX = Math.max(0, wrapWidth - JOURNAL_PHOTO_WIDTH);
+  const maxY = Math.max(0, wrapHeight - JOURNAL_PHOTO_HEIGHT - JOURNAL_PHOTO_BOTTOM_RESERVED);
+  return {
+    x: Math.min(Math.max(0, Math.round(x)), maxX),
+    y: Math.min(Math.max(0, Math.round(y)), maxY),
+  };
 };
 
-const formatHumanDuration = (ms, lang) => {
-  const totalSec = Math.max(0, Math.floor(Number(ms) / 1000));
-  const hour = Math.floor(totalSec / 3600);
-  const min = Math.floor((totalSec % 3600) / 60);
-  const sec = totalSec % 60;
-  if (lang === 'en') {
-    if (hour > 0) {
-      return `${hour}h ${min}m`;
-    }
-    if (min > 0) {
-      return `${min}m ${sec}s`;
-    }
-    return `${sec}s`;
-  }
-  if (hour > 0) {
-    return `${hour} sa ${min} dk`;
-  }
-  if (min > 0) {
-    return `${min} dk ${sec} sn`;
-  }
-  return `${sec} sn`;
-};
+const isValidJournalPhotoDataUrl = (value) =>
+  typeof value === 'string' && value.startsWith('data:image/') && value.length <= MAX_JOURNAL_PHOTO_LENGTH;
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -134,6 +132,11 @@ export default function HomeScreen({ authToken, onLogout }) {
   const todayRef = useRef(new Date());
   const [activeTab, setActiveTab] = useState('Ajanda');
   const [journalText, setJournalText] = useState('');
+  const [journalPhoto, setJournalPhoto] = useState(null);
+  const [journalPhotoOffset, setJournalPhotoOffset] = useState(DEFAULT_JOURNAL_PHOTO_OFFSET);
+  const [notebookWrapSize, setNotebookWrapSize] = useState({ width: 0, height: 0 });
+  const journalPhotoOffsetRef = useRef(DEFAULT_JOURNAL_PHOTO_OFFSET);
+  const journalPhotoDragOriginRef = useRef(DEFAULT_JOURNAL_PHOTO_OFFSET);
   const [journalEntries, setJournalEntries] = useState([]);
   const [selectedEntryId, setSelectedEntryId] = useState(null);
   const [theme, setTheme] = useState('light');
@@ -167,7 +170,6 @@ export default function HomeScreen({ authToken, onLogout }) {
   const [stopwatchRenderTick, setStopwatchRenderTick] = useState(0);
   const stopwatchAccumulatedRef = useRef(0);
   const stopwatchSegmentStartRef = useRef(null);
-  const [localStats, setLocalStats] = useState(() => defaultLocalStats());
   const [statsAgendaAll, setStatsAgendaAll] = useState([]);
   const [statsAgendaLoading, setStatsAgendaLoading] = useState(false);
 
@@ -264,31 +266,6 @@ export default function HomeScreen({ authToken, onLogout }) {
       globalThis?.localStorage?.setItem(NOTIFICATION_MINUTE_KEY, notificationMinute);
     }
   }, [notificationHour, notificationMinute]);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const raw = await AsyncStorage.getItem(LOCAL_STATS_KEY);
-        if (cancelled || !raw) {
-          return;
-        }
-        const parsed = JSON.parse(raw);
-        if (cancelled) {
-          return;
-        }
-        setLocalStats({
-          stopwatchTotalMs: Math.max(0, Number(parsed.stopwatchTotalMs) || 0),
-          stopwatchPauseCount: Math.max(0, Number(parsed.stopwatchPauseCount) || 0),
-        });
-      } catch {
-        /* ignore corrupt storage */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   useEffect(() => {
     const loadJournalEntries = async () => {
@@ -447,40 +424,10 @@ export default function HomeScreen({ authToken, onLogout }) {
     return stopwatchAccumulatedRef.current + segment;
   }, [stopwatchRunning, stopwatchRenderTick]);
 
-  const recordStopwatchPauseSegment = (segmentMs) => {
-    if (segmentMs < 200) {
-      return;
-    }
-    setLocalStats((prev) => {
-      const next = {
-        stopwatchTotalMs: prev.stopwatchTotalMs + segmentMs,
-        stopwatchPauseCount: prev.stopwatchPauseCount + 1,
-      };
-      persistLocalStats(next);
-      return next;
-    });
-  };
-
-  const recordStopwatchRunningSegmentOnReset = (segmentMs) => {
-    if (segmentMs < 200) {
-      return;
-    }
-    setLocalStats((prev) => {
-      const next = {
-        ...prev,
-        stopwatchTotalMs: prev.stopwatchTotalMs + segmentMs,
-      };
-      persistLocalStats(next);
-      return next;
-    });
-  };
-
   const handleStopwatchPrimaryPress = () => {
     if (stopwatchRunning) {
       if (stopwatchSegmentStartRef.current != null) {
-        const segment = Date.now() - stopwatchSegmentStartRef.current;
-        stopwatchAccumulatedRef.current += segment;
-        recordStopwatchPauseSegment(segment);
+        stopwatchAccumulatedRef.current += Date.now() - stopwatchSegmentStartRef.current;
         stopwatchSegmentStartRef.current = null;
       }
       setStopwatchRunning(false);
@@ -491,10 +438,6 @@ export default function HomeScreen({ authToken, onLogout }) {
   };
 
   const handleStopwatchResetPress = () => {
-    if (stopwatchRunning && stopwatchSegmentStartRef.current != null) {
-      const segment = Date.now() - stopwatchSegmentStartRef.current;
-      recordStopwatchRunningSegmentOnReset(segment);
-    }
     stopwatchAccumulatedRef.current = 0;
     stopwatchSegmentStartRef.current = null;
     setStopwatchRunning(false);
@@ -539,15 +482,14 @@ export default function HomeScreen({ authToken, onLogout }) {
         statAgendaCard: 'Agenda',
         statAgendaTotalLabel: 'All tasks',
         statAgendaDoneLabel: 'Completed',
-        statChronoCard: 'Stopwatch (on device)',
-        statChronoTotalLabel: 'Total measured time',
-        statChronoPausesLabel: 'Pause events counted',
-        statPersistHint: 'Stopwatch totals stay on this device.',
         statLoadingAgenda: 'Loading agenda…',
         chronoStart: 'Start',
         chronoPause: 'Pause',
         chronoResume: 'Resume',
         chronoReset: 'Reset',
+        journalAddPhoto: 'Add photo',
+        journalRemovePhoto: 'Remove photo',
+        journalPhotoBadge: 'Photo',
       };
     }
     return {
@@ -579,15 +521,14 @@ export default function HomeScreen({ authToken, onLogout }) {
       statAgendaCard: 'Ajanda',
       statAgendaTotalLabel: 'Toplam gorev',
       statAgendaDoneLabel: 'Tamamlanan',
-      statChronoCard: 'Kronometre (cihazda)',
-      statChronoTotalLabel: 'Toplam olculen sure',
-      statChronoPausesLabel: 'Sayilan duraklatma',
-      statPersistHint: 'Kronometre toplamlari bu cihazda saklanir.',
       statLoadingAgenda: 'Ajanda yukleniyor...',
       chronoStart: 'Basla',
       chronoPause: 'Duraklat',
       chronoResume: 'Devam',
       chronoReset: 'Sifirla',
+      journalAddPhoto: 'Fotograf ekle',
+      journalRemovePhoto: 'Fotografi kaldir',
+      journalPhotoBadge: 'Fotograf',
     };
   }, [language]);
 
@@ -618,6 +559,81 @@ export default function HomeScreen({ authToken, onLogout }) {
     };
 
     input.click();
+  };
+
+  const applyJournalPhotoDataUrl = (imageData) => {
+    if (!isValidJournalPhotoDataUrl(imageData)) {
+      Alert.alert(
+        language === 'en' ? 'Photo too large' : 'Fotograf cok buyuk',
+        language === 'en'
+          ? 'Please choose a smaller image.'
+          : 'Lutfen daha kucuk bir gorsel secin.'
+      );
+      return;
+    }
+    setJournalPhoto(imageData);
+    setJournalPhotoOffset(DEFAULT_JOURNAL_PHOTO_OFFSET);
+  };
+
+  const clearJournalPhoto = () => {
+    setJournalPhoto(null);
+    setJournalPhotoOffset(DEFAULT_JOURNAL_PHOTO_OFFSET);
+  };
+
+  const pickJournalPhoto = async () => {
+    if (Platform.OS === 'web') {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/*';
+      input.onchange = (event) => {
+        const file = event?.target?.files?.[0];
+        if (!file) {
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = () => {
+          if (typeof reader.result === 'string') {
+            applyJournalPhotoDataUrl(reader.result);
+          }
+        };
+        reader.readAsDataURL(file);
+      };
+      input.click();
+      return;
+    }
+
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (permission.status !== 'granted') {
+      Alert.alert(
+        language === 'en' ? 'Permission required' : 'Izin gerekli',
+        language === 'en'
+          ? 'Allow gallery access to add a photo.'
+          : 'Fotograf eklemek icin galeri izni verin.'
+      );
+      return;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsEditing: true,
+      quality: 0.7,
+      base64: true,
+    });
+
+    if (result.canceled || !result.assets?.length) {
+      return;
+    }
+
+    const asset = result.assets[0];
+    const mime = asset.mimeType || 'image/jpeg';
+    if (!asset.base64) {
+      Alert.alert(
+        language === 'en' ? 'Error' : 'Hata',
+        language === 'en' ? 'Could not load the selected image.' : 'Secilen gorsel yuklenemedi.'
+      );
+      return;
+    }
+    applyJournalPhotoDataUrl(`data:${mime};base64,${asset.base64}`);
   };
 
   const setDailyReminder = async () => {
@@ -676,8 +692,7 @@ export default function HomeScreen({ authToken, onLogout }) {
       return;
     }
 
-    // Expo scheduled notifications are not set up on web (`setDailyReminder` returns false
-    // there); still persist the user's choice so the toggle and reminder time save correctly.
+ 
     if (Platform.OS === 'web') {
       setNotificationsEnabled(true);
       return;
@@ -704,6 +719,40 @@ export default function HomeScreen({ authToken, onLogout }) {
     }
   };
 
+  useEffect(() => {
+    journalPhotoOffsetRef.current = journalPhotoOffset;
+  }, [journalPhotoOffset]);
+
+  useEffect(() => {
+    if (!journalPhoto || !notebookWrapSize.width) {
+      return;
+    }
+    setJournalPhotoOffset((prev) =>
+      clampJournalPhotoOffset(prev.x, prev.y, notebookWrapSize.width, notebookWrapSize.height),
+    );
+  }, [notebookWrapSize.width, notebookWrapSize.height, journalPhoto]);
+
+  const journalPhotoPanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderGrant: () => {
+          journalPhotoDragOriginRef.current = { ...journalPhotoOffsetRef.current };
+        },
+        onPanResponderMove: (_, gestureState) => {
+          const next = clampJournalPhotoOffset(
+            journalPhotoDragOriginRef.current.x + gestureState.dx,
+            journalPhotoDragOriginRef.current.y + gestureState.dy,
+            notebookWrapSize.width,
+            notebookWrapSize.height,
+          );
+          setJournalPhotoOffset(next);
+        },
+      }),
+    [notebookWrapSize.width, notebookWrapSize.height],
+  );
+
   const formatDateLabel = (isoDate) => {
     const parsed = new Date(isoDate);
     if (Number.isNaN(parsed.getTime())) {
@@ -721,7 +770,7 @@ export default function HomeScreen({ authToken, onLogout }) {
 
   const saveJournalEntry = async () => {
     const trimmedText = journalText.trim();
-    if (!trimmedText || !authToken) {
+    if ((!trimmedText && !journalPhoto) || !authToken) {
       return;
     }
 
@@ -735,7 +784,12 @@ export default function HomeScreen({ authToken, onLogout }) {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${authToken}`,
           },
-          body: JSON.stringify({ content: trimmedText }),
+          body: JSON.stringify({
+            content: trimmedText,
+            photo: journalPhoto,
+            photo_offset_x: journalPhoto ? journalPhotoOffset.x : 0,
+            photo_offset_y: journalPhoto ? journalPhotoOffset.y : 0,
+          }),
         }
       );
       const data = await response.json();
@@ -757,6 +811,7 @@ export default function HomeScreen({ authToken, onLogout }) {
         return [data, ...prev];
       });
       setJournalText('');
+      clearJournalPhoto();
       setSelectedEntryId(null);
     } catch (error) {
       console.error('Gunluk kaydi eklenemedi:', error);
@@ -767,6 +822,15 @@ export default function HomeScreen({ authToken, onLogout }) {
   const handleSelectEntry = (entry) => {
     setSelectedEntryId(entry.id);
     setJournalText(entry.content || '');
+    setJournalPhoto(entry.photo || null);
+    setJournalPhotoOffset(
+      clampJournalPhotoOffset(
+        Number(entry.photo_offset_x) || 0,
+        Number(entry.photo_offset_y) || 0,
+        notebookWrapSize.width,
+        notebookWrapSize.height,
+      ),
+    );
   };
 
   const handleChangePassword = async () => {
@@ -1074,7 +1138,12 @@ export default function HomeScreen({ authToken, onLogout }) {
                       onPress={() => handleSelectEntry(entry)}
                     >
                       <Text style={[styles.entryDate, { color: isDarkTheme ? '#FBBF24' : '#A16207' }]}>{formatDateLabel(entry.created_at)}</Text>
-                      <Text style={[styles.entryPreview, { color: palette.textPrimary }]} numberOfLines={2}>{entry.content}</Text>
+                      {entry.photo ? (
+                        <Image source={{ uri: entry.photo }} style={styles.entryCardThumb} />
+                      ) : null}
+                      <Text style={[styles.entryPreview, { color: palette.textPrimary }]} numberOfLines={2}>
+                        {entry.content?.trim() ? entry.content : t.journalPhotoBadge}
+                      </Text>
                     </TouchableOpacity>
                   ))
                 )}
@@ -1082,13 +1151,30 @@ export default function HomeScreen({ authToken, onLogout }) {
             </View>
 
             <View style={[styles.notebookContainer, { backgroundColor: isDarkTheme ? '#1F2937' : '#FFFDF6' }]}>
-              <View style={styles.notebookMarginLine} />
               <View style={styles.notebookLinesLayer} pointerEvents="none">
                 {notebookLines.map((_, index) => (
                   <View key={index} style={[styles.notebookLine, { backgroundColor: isDarkTheme ? '#334155' : '#E9D8AE' }]} />
                 ))}
               </View>
-              <View style={styles.notebookTextWrap}>
+              <View
+                style={styles.notebookTextWrap}
+                onLayout={(event) => {
+                  const { width, height } = event.nativeEvent.layout;
+                  setNotebookWrapSize({ width, height });
+                }}
+              >
+                <TouchableOpacity
+                  style={[
+                    styles.journalPhotoIconButton,
+                    styles.journalPhotoIconButtonCorner,
+                    { borderColor: palette.border, backgroundColor: isDarkTheme ? '#273449' : '#FFF8E6' },
+                  ]}
+                  onPress={pickJournalPhoto}
+                  activeOpacity={0.85}
+                  accessibilityLabel={t.journalAddPhoto}
+                >
+                  <Ionicons name="image-outline" size={18} color={palette.textPrimary} />
+                </TouchableOpacity>
                 <TextInput
                   style={[styles.journalInput, { color: palette.textPrimary }]}
                   value={journalText}
@@ -1098,9 +1184,32 @@ export default function HomeScreen({ authToken, onLogout }) {
                   multiline
                   textAlignVertical="top"
                 />
-                <TouchableOpacity style={styles.saveButton} onPress={saveJournalEntry}>
-                  <Text style={styles.saveButtonText}>{selectedEntryId ? 'Guncelle' : 'Kaydet'}</Text>
-                </TouchableOpacity>
+                {journalPhoto ? (
+                  <View
+                    style={[
+                      styles.journalPhotoDraggable,
+                      {
+                        left: journalPhotoOffset.x,
+                        top: journalPhotoOffset.y,
+                      },
+                    ]}
+                    {...journalPhotoPanResponder.panHandlers}
+                  >
+                    <Image source={{ uri: journalPhoto }} style={styles.journalPhotoPreview} resizeMode="cover" />
+                    <TouchableOpacity
+                      style={[styles.journalPhotoRemoveButton, { borderColor: palette.border }]}
+                      onPress={clearJournalPhoto}
+                      activeOpacity={0.85}
+                    >
+                      <Ionicons name="close" size={16} color={palette.textPrimary} />
+                    </TouchableOpacity>
+                  </View>
+                ) : null}
+                <View style={styles.journalActionsRow}>
+                  <TouchableOpacity style={styles.saveButton} onPress={saveJournalEntry}>
+                    <Text style={styles.saveButtonText}>{selectedEntryId ? 'Guncelle' : 'Kaydet'}</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             </View>
           </View>
@@ -1654,6 +1763,7 @@ export default function HomeScreen({ authToken, onLogout }) {
             showsVerticalScrollIndicator={false}
           >
             <Text style={[styles.statsScreenTitle, { color: palette.textPrimary }]}>{t.statScreenTitle}</Text>
+
             {statsAgendaLoading ? (
               <View style={styles.statsLoadingRow}>
                 <ActivityIndicator color="#E8A24D" />
@@ -1685,24 +1795,6 @@ export default function HomeScreen({ authToken, onLogout }) {
                 <Text style={[styles.statsRowLabel, { color: palette.textSecondary }]}>{t.statAgendaDoneLabel}</Text>
                 <Text style={[styles.statsRowValue, { color: palette.textPrimary }]}>{statsAgendaCompleted}</Text>
               </View>
-            </View>
-
-            <View style={[styles.statsCard, { borderColor: palette.border, backgroundColor: palette.cardBg }]}>
-              <View style={styles.statsCardHeader}>
-                <Ionicons name="timer-outline" size={20} color="#E8A24D" />
-                <Text style={[styles.statsCardTitle, { color: palette.textPrimary }]}>{t.statChronoCard}</Text>
-              </View>
-              <View style={[styles.statsRow, { borderTopColor: palette.border }]}>
-                <Text style={[styles.statsRowLabel, { color: palette.textSecondary }]}>{t.statChronoTotalLabel}</Text>
-                <Text style={[styles.statsRowValue, { color: palette.textPrimary }]}>
-                  {formatHumanDuration(localStats.stopwatchTotalMs, language)}
-                </Text>
-              </View>
-              <View style={[styles.statsRow, { borderTopColor: palette.border }]}>
-                <Text style={[styles.statsRowLabel, { color: palette.textSecondary }]}>{t.statChronoPausesLabel}</Text>
-                <Text style={[styles.statsRowValue, { color: palette.textPrimary }]}>{localStats.stopwatchPauseCount}</Text>
-              </View>
-              <Text style={[styles.statsFootnote, { color: palette.textSecondary }]}>{t.statPersistHint}</Text>
             </View>
           </ScrollView>
         ) : (
@@ -2063,11 +2155,6 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     fontVariant: ['tabular-nums'],
   },
-  statsFootnote: {
-    fontSize: 12,
-    marginTop: 8,
-    lineHeight: 17,
-  },
   agendaViewSwitchRow: {
     flexDirection: 'row',
     gap: 8,
@@ -2401,15 +2488,6 @@ const styles = StyleSheet.create({
     color: '#6B4F00',
     fontSize: 12,
   },
-  notebookMarginLine: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    left: 48,
-    width: 2,
-    backgroundColor: '#F3A4A4',
-    opacity: 0.85,
-  },
   notebookLinesLayer: {
     ...StyleSheet.absoluteFillObject,
     justifyContent: 'space-between',
@@ -2423,8 +2501,9 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: 12,
     bottom: 12,
-    left: 64,
+    left: 16,
     right: 16,
+    overflow: 'hidden',
   },
   journalInput: {
     marginTop: 0,
@@ -2433,7 +2512,8 @@ const styles = StyleSheet.create({
     borderWidth: 0,
     backgroundColor: 'transparent',
     paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingTop: 40,
+    paddingBottom: 8,
     color: '#5B3A00',
     fontSize: 15,
     lineHeight: 23,
@@ -2443,9 +2523,57 @@ const styles = StyleSheet.create({
       },
     }),
   },
-  saveButton: {
-    alignSelf: 'flex-end',
+  journalActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 8,
     marginTop: 10,
+  },
+  journalPhotoIconButton: {
+    width: 34,
+    height: 34,
+    borderWidth: 1,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  journalPhotoIconButtonCorner: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    zIndex: 2,
+  },
+  journalPhotoDraggable: {
+    position: 'absolute',
+    zIndex: 3,
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  journalPhotoPreview: {
+    width: JOURNAL_PHOTO_WIDTH,
+    height: JOURNAL_PHOTO_HEIGHT,
+    borderRadius: 12,
+  },
+  journalPhotoRemoveButton: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    borderWidth: 1,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  entryCardThumb: {
+    width: '100%',
+    height: 56,
+    borderRadius: 8,
+    marginBottom: 6,
+  },
+  saveButton: {
     backgroundColor: '#F59E0B',
     borderRadius: 10,
     paddingHorizontal: 16,

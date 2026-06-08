@@ -31,5 +31,6 @@ class AgendaTask(Base):
     task_date = Column(String, nullable=False, index=True)
     content = Column(Text, nullable=False)
     color = Column(String, nullable=False, default="#EF4444")
+    task_time = Column(String, nullable=True)
     completed = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

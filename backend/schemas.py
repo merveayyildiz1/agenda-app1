@@ -50,6 +50,7 @@ class AgendaTaskCreate(BaseModel):
     task_date: str
     content: str
     color: str
+    task_time: str | None = None
 
 
 class AgendaTaskStatusUpdate(BaseModel):
@@ -61,6 +62,7 @@ class AgendaTaskOut(BaseModel):
     task_date: str
     content: str
     color: str
+    task_time: str | None = None
     completed: bool
     created_at: datetime
 

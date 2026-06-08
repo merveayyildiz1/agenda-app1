@@ -116,6 +116,42 @@ const getMonthGridDays = (monthDate) => {
   return Array.from({ length: 42 }, (_, index) => addDays(gridStart, index));
 };
 
+const parseTaskTime = (value) => {
+  const match = String(value || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    return null;
+  }
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+};
+
+const formatTaskTimeDisplay = (value) => parseTaskTime(value) || '';
+
+const sortAgendaTasksByTime = (tasks) =>
+  [...tasks].sort((a, b) => {
+    const aTime = parseTaskTime(a.task_time);
+    const bTime = parseTaskTime(b.task_time);
+    if (aTime && bTime && aTime !== bTime) {
+      return aTime.localeCompare(bTime);
+    }
+    if (aTime && !bTime) {
+      return -1;
+    }
+    if (!aTime && bTime) {
+      return 1;
+    }
+    return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+  });
+
+const getDefaultTaskTime = () => {
+  const now = new Date();
+  return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+};
+
 const buildDateStrip = (days = 10, baseDate = new Date()) => {
   return Array.from({ length: days }, (_, index) => {
     const nextDate = new Date(baseDate);
@@ -152,6 +188,8 @@ export default function HomeScreen({ authToken, onLogout }) {
   const [agendaTasks, setAgendaTasks] = useState([]);
   const [agendaMonthTasks, setAgendaMonthTasks] = useState([]);
   const [agendaTaskText, setAgendaTaskText] = useState('');
+  const [agendaTaskTimeEnabled, setAgendaTaskTimeEnabled] = useState(false);
+  const [agendaTaskTimeText, setAgendaTaskTimeText] = useState('');
   const [selectedAgendaDate, setSelectedAgendaDate] = useState(() => toDateKey(new Date()));
   const [agendaViewMode, setAgendaViewMode] = useState('list');
   const [agendaCalendarMonthDate, setAgendaCalendarMonthDate] = useState(() => getMonthStart(new Date()));
@@ -318,7 +356,7 @@ export default function HomeScreen({ authToken, onLogout }) {
         return;
       }
       if (response.ok && Array.isArray(data)) {
-        setHomeTodayTasks(data);
+        setHomeTodayTasks(sortAgendaTasksByTime(data));
       }
     } catch (error) {
       console.error('Ana sayfa gorevleri yuklenemedi:', error);
@@ -355,7 +393,7 @@ export default function HomeScreen({ authToken, onLogout }) {
           return;
         }
         if (response.ok && Array.isArray(data)) {
-          setAgendaTasks(data);
+          setAgendaTasks(sortAgendaTasksByTime(data));
         }
       } catch (error) {
         console.error('Ajanda gorevleri yuklenemedi:', error);
@@ -541,6 +579,12 @@ export default function HomeScreen({ authToken, onLogout }) {
         homeTitle: "Today's plan",
         homeEmptyTasks: 'No tasks for today yet.',
         homeGoAgenda: 'Add in Agenda',
+        homeJournalPrompt: 'Did you write your journal today?',
+        homeJournalDone: 'You wrote your journal today!',
+        homeGoJournal: 'Go to Journal',
+        agendaAddTime: 'Add time',
+        agendaTimePlaceholder: '14:30',
+        agendaTimeHint: 'Optional. Example: 14:30',
         tabSettings: 'Settings',
         tabStats: 'Stats',
         statScreenTitle: 'Statistics',
@@ -560,6 +604,10 @@ export default function HomeScreen({ authToken, onLogout }) {
         journalAddPhoto: 'Add photo',
         journalRemovePhoto: 'Remove photo',
         journalPhotoBadge: 'Photo',
+        journalDelete: 'Delete',
+        journalDeleteConfirmTitle: 'Delete journal entry?',
+        journalDeleteConfirmMessage: 'This entry will be permanently removed.',
+        journalDeleteSuccess: 'Journal entry deleted.',
       };
     }
     return {
@@ -587,6 +635,12 @@ export default function HomeScreen({ authToken, onLogout }) {
       homeTitle: 'Bugunun plani',
       homeEmptyTasks: 'Bugun icin henuz gorev eklenmedi.',
       homeGoAgenda: 'Ajandadan ekle',
+      homeJournalPrompt: 'Bugun gunlugunu yazdin mi?',
+      homeJournalDone: 'Bugun gunlugunu yazdin!',
+      homeGoJournal: 'Gunluge git',
+      agendaAddTime: 'Saat ekle',
+      agendaTimePlaceholder: '14:30',
+      agendaTimeHint: 'Istege bagli. Ornek: 14:30',
       tabSettings: 'Ayarlar',
       tabStats: 'Istatistik',
       statScreenTitle: 'Istatistik',
@@ -606,6 +660,10 @@ export default function HomeScreen({ authToken, onLogout }) {
       journalAddPhoto: 'Fotograf ekle',
       journalRemovePhoto: 'Fotografi kaldir',
       journalPhotoBadge: 'Fotograf',
+      journalDelete: 'Sil',
+      journalDeleteConfirmTitle: 'Gunluk silinsin mi?',
+      journalDeleteConfirmMessage: 'Bu gunluk kaydi kalici olarak silinecek.',
+      journalDeleteSuccess: 'Gunluk kaydi silindi.',
     };
   }, [language]);
 
@@ -910,6 +968,59 @@ export default function HomeScreen({ authToken, onLogout }) {
     );
   };
 
+  const clearJournalEditor = () => {
+    setSelectedEntryId(null);
+    setJournalText('');
+    clearJournalPhoto();
+  };
+
+  const deleteJournalEntry = async (entryId) => {
+    if (!authToken) {
+      return;
+    }
+
+    const id = Number(entryId);
+    if (!Number.isFinite(id)) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/journal/${id}`, {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+        },
+      });
+
+      if (response.status === 401) {
+        onLogout?.();
+        return;
+      }
+
+      let data = {};
+      try {
+        const text = await response.text();
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        data = {};
+      }
+
+      if (!response.ok) {
+        const detail = typeof data.detail === 'string' ? data.detail : 'Gunluk kaydi silinemedi.';
+        Alert.alert('Hata', detail);
+        return;
+      }
+
+      setJournalEntries((prev) => prev.filter((entry) => Number(entry.id) !== id));
+      if (Number(selectedEntryId) === id) {
+        clearJournalEditor();
+      }
+    } catch (error) {
+      console.error('Gunluk kaydi silinemedi:', error);
+      Alert.alert('Hata', 'Sunucuya baglanirken bir sorun olustu.');
+    }
+  };
+
   const handleChangePassword = async () => {
     if (!authToken) {
       return;
@@ -967,6 +1078,15 @@ export default function HomeScreen({ authToken, onLogout }) {
       return;
     }
 
+    let taskTime = null;
+    if (agendaTaskTimeEnabled) {
+      taskTime = parseTaskTime(agendaTaskTimeText);
+      if (!taskTime) {
+        Alert.alert('Hata', language === 'en' ? 'Enter a valid time. Example: 14:30' : 'Gecerli bir saat girin. Ornek: 14:30');
+        return;
+      }
+    }
+
     try {
       const response = await fetch(`${API_BASE_URL}/agenda`, {
         method: 'POST',
@@ -978,6 +1098,7 @@ export default function HomeScreen({ authToken, onLogout }) {
           task_date: selectedAgendaDate,
           content: trimmedTask,
           color: selectedTaskColor,
+          task_time: taskTime,
         }),
       });
       const data = await response.json();
@@ -991,12 +1112,14 @@ export default function HomeScreen({ authToken, onLogout }) {
         return;
       }
 
-      setAgendaTasks((prev) => [...prev, data]);
+      setAgendaTasks((prev) => sortAgendaTasksByTime([...prev, data]));
       setAgendaMonthTasks((prev) => [...prev, data]);
       if (data.task_date === todayDateKey) {
-        setHomeTodayTasks((prev) => [...prev, data]);
+        setHomeTodayTasks((prev) => sortAgendaTasksByTime([...prev, data]));
       }
       setAgendaTaskText('');
+      setAgendaTaskTimeEnabled(false);
+      setAgendaTaskTimeText('');
     } catch (error) {
       console.error('Ajanda gorevi kaydedilemedi:', error);
       Alert.alert('Hata', 'Sunucuya baglanirken bir sorun olustu.');
@@ -1136,8 +1259,43 @@ export default function HomeScreen({ authToken, onLogout }) {
     ]);
   };
 
+  const askDeleteJournalEntry = (entryId) => {
+    const entry = journalEntries.find((item) => Number(item.id) === Number(entryId));
+    const entryLabel = entry ? formatDateLabel(entry.created_at) : '';
+    const runDelete = () => deleteJournalEntry(entryId);
+    if (Platform.OS === 'web') {
+      const message = entryLabel
+        ? `${t.journalDeleteConfirmMessage}\n\n${entryLabel}`
+        : t.journalDeleteConfirmMessage;
+      const ok = typeof globalThis.confirm === 'function' && globalThis.confirm(message);
+      if (ok) {
+        runDelete();
+      }
+      return;
+    }
+    Alert.alert(
+      t.journalDeleteConfirmTitle,
+      entryLabel ? `${t.journalDeleteConfirmMessage}\n\n${entryLabel}` : t.journalDeleteConfirmMessage,
+      [
+        { text: language === 'en' ? 'Cancel' : 'Iptal', style: 'cancel' },
+        {
+          text: t.journalDelete,
+          style: 'destructive',
+          onPress: runDelete,
+        },
+      ],
+    );
+  };
+
   const renderAgendaRightAction = (taskId) => (
     <RectButton style={styles.agendaSwipeDeleteAction} onPress={() => askDeleteAgendaTask(taskId)}>
+      <Ionicons name="trash" size={16} color="#FFFFFF" />
+      <Text style={styles.agendaSwipeDeleteText}>Sil</Text>
+    </RectButton>
+  );
+
+  const renderJournalRightAction = (entryId) => (
+    <RectButton style={styles.journalSwipeDeleteAction} onPress={() => askDeleteJournalEntry(entryId)}>
       <Ionicons name="trash" size={16} color="#FFFFFF" />
       <Text style={styles.agendaSwipeDeleteText}>Sil</Text>
     </RectButton>
@@ -1209,6 +1367,17 @@ export default function HomeScreen({ authToken, onLogout }) {
     });
   }, [todayDateKey, language]);
 
+  const hasJournalToday = useMemo(
+    () =>
+      journalEntries.some((entry) => {
+        if (!entry?.created_at) {
+          return false;
+        }
+        return toDateKey(new Date(entry.created_at)) === todayDateKey;
+      }),
+    [journalEntries, todayDateKey],
+  );
+
   return (
     <GestureHandlerRootView style={styles.gestureRoot}>
     <SafeAreaView style={[styles.container, { backgroundColor: palette.pageBg }]}>
@@ -1225,6 +1394,45 @@ export default function HomeScreen({ authToken, onLogout }) {
           >
             <Text style={[styles.homeTitle, { color: palette.textPrimary }]}>{t.homeTitle}</Text>
             <Text style={[styles.homeDateLabel, { color: palette.textSecondary }]}>{homeTodayDateLabel}</Text>
+
+            <View
+              style={[
+                styles.homeJournalCard,
+                {
+                  borderColor: hasJournalToday ? '#86EFAC' : '#FCD34D',
+                  backgroundColor: hasJournalToday
+                    ? (isDarkTheme ? '#14532D' : '#F0FDF4')
+                    : (isDarkTheme ? '#422006' : '#FFFBEB'),
+                },
+              ]}
+            >
+              <View style={styles.homeJournalCardHeader}>
+                <Ionicons
+                  name={hasJournalToday ? 'checkmark-circle' : 'book-outline'}
+                  size={20}
+                  color={hasJournalToday ? '#16A34A' : '#D97706'}
+                />
+                <Text
+                  style={[
+                    styles.homeJournalCardText,
+                    { color: hasJournalToday ? (isDarkTheme ? '#BBF7D0' : '#166534') : (isDarkTheme ? '#FDE68A' : '#92400E') },
+                  ]}
+                >
+                  {hasJournalToday ? t.homeJournalDone : t.homeJournalPrompt}
+                </Text>
+              </View>
+              {!hasJournalToday ? (
+                <TouchableOpacity
+                  style={[styles.homeGoJournalButton, { borderColor: palette.border, backgroundColor: palette.settingsInputBg }]}
+                  onPress={() => setActiveTab('Gunluk')}
+                  activeOpacity={0.88}
+                >
+                  <Ionicons name="create-outline" size={15} color={palette.textPrimary} />
+                  <Text style={[styles.homeGoJournalText, { color: palette.textPrimary }]}>{t.homeGoJournal}</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+
             {homeTodayTasks.length > 0 ? (
               <Text style={[styles.homeSummaryText, { color: palette.textSecondary }]}>
                 {language === 'en'
@@ -1272,15 +1480,22 @@ export default function HomeScreen({ authToken, onLogout }) {
                             >
                               {task.completed ? <Ionicons name="checkmark" size={14} color="#15803D" /> : null}
                             </TouchableOpacity>
-                            <Text
-                              style={[
-                                styles.agendaTaskText,
-                                { color: palette.textPrimary },
-                                task.completed && styles.agendaTaskTextCompleted,
-                              ]}
-                            >
-                              {task.content}
-                            </Text>
+                            <View style={styles.agendaTaskTextWrap}>
+                              {task.task_time ? (
+                                <Text style={[styles.agendaTaskTime, { color: palette.textSecondary }]}>
+                                  {formatTaskTimeDisplay(task.task_time)}
+                                </Text>
+                              ) : null}
+                              <Text
+                                style={[
+                                  styles.agendaTaskText,
+                                  { color: palette.textPrimary },
+                                  task.completed && styles.agendaTaskTextCompleted,
+                                ]}
+                              >
+                                {task.content}
+                              </Text>
+                            </View>
                           </View>
                           <View style={styles.agendaTaskActions}>
                             <View style={[styles.agendaTaskColorBadge, { backgroundColor: task.color || '#EF4444' }]} />
@@ -1314,24 +1529,36 @@ export default function HomeScreen({ authToken, onLogout }) {
                   <View />
                 ) : (
                   journalEntries.map((entry) => (
-                    <TouchableOpacity
+                    <Swipeable
                       key={entry.id}
-                      style={[
-                        styles.entryCard,
-                        { borderColor: palette.border, backgroundColor: isDarkTheme ? '#273449' : '#FFF8E6' },
-                        selectedEntryId === entry.id && styles.entryCardActive,
-                      ]}
-                      activeOpacity={0.8}
-                      onPress={() => handleSelectEntry(entry)}
+                      overshootRight={false}
+                      renderRightActions={() => renderJournalRightAction(entry.id)}
                     >
-                      <Text style={[styles.entryDate, { color: isDarkTheme ? '#FBBF24' : '#A16207' }]}>{formatDateLabel(entry.created_at)}</Text>
-                      {entry.photo ? (
-                        <Image source={{ uri: entry.photo }} style={styles.entryCardThumb} />
-                      ) : null}
-                      <Text style={[styles.entryPreview, { color: palette.textPrimary }]} numberOfLines={2}>
-                        {entry.content?.trim() ? entry.content : t.journalPhotoBadge}
-                      </Text>
-                    </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[
+                          styles.entryCard,
+                          { borderColor: palette.border, backgroundColor: isDarkTheme ? '#273449' : '#FFF8E6' },
+                          selectedEntryId === entry.id && styles.entryCardActive,
+                        ]}
+                        activeOpacity={0.8}
+                        onPress={() => handleSelectEntry(entry)}
+                      >
+                        <View style={styles.entryCardHeader}>
+                          <Text style={[styles.entryDate, { color: isDarkTheme ? '#FBBF24' : '#A16207' }]}>
+                            {formatDateLabel(entry.created_at)}
+                          </Text>
+                          <View style={[styles.journalSwipeHintBadge, { backgroundColor: isDarkTheme ? '#7F1D1D' : '#FEE2E2' }]}>
+                            <Ionicons name="chevron-back" size={12} color={isDarkTheme ? '#FCA5A5' : '#B91C1C'} />
+                          </View>
+                        </View>
+                        {entry.photo ? (
+                          <Image source={{ uri: entry.photo }} style={styles.entryCardThumb} />
+                        ) : null}
+                        <Text style={[styles.entryPreview, { color: palette.textPrimary }]} numberOfLines={2}>
+                          {entry.content?.trim() ? entry.content : t.journalPhotoBadge}
+                        </Text>
+                      </TouchableOpacity>
+                    </Swipeable>
                   ))
                 )}
               </ScrollView>
@@ -1620,15 +1847,22 @@ export default function HomeScreen({ authToken, onLogout }) {
                             >
                               {task.completed ? <Ionicons name="checkmark" size={14} color="#15803D" /> : null}
                             </TouchableOpacity>
-                            <Text
-                              style={[
-                                styles.agendaTaskText,
-                                { color: palette.textPrimary },
-                                task.completed && styles.agendaTaskTextCompleted,
-                              ]}
-                            >
-                              {task.content}
-                            </Text>
+                            <View style={styles.agendaTaskTextWrap}>
+                              {task.task_time ? (
+                                <Text style={[styles.agendaTaskTime, { color: palette.textSecondary }]}>
+                                  {formatTaskTimeDisplay(task.task_time)}
+                                </Text>
+                              ) : null}
+                              <Text
+                                style={[
+                                  styles.agendaTaskText,
+                                  { color: palette.textPrimary },
+                                  task.completed && styles.agendaTaskTextCompleted,
+                                ]}
+                              >
+                                {task.content}
+                              </Text>
+                            </View>
                           </View>
                           <View style={styles.agendaTaskActions}>
                             <View style={[styles.agendaTaskColorBadge, { backgroundColor: task.color || '#EF4444' }]} />
@@ -1651,6 +1885,60 @@ export default function HomeScreen({ authToken, onLogout }) {
                   placeholderTextColor={isDarkTheme ? '#94A3B8' : '#9CA3AF'}
                   style={[styles.agendaInput, { color: palette.textPrimary }]}
                 />
+                <View style={styles.agendaTimeRow}>
+                  <TouchableOpacity
+                    style={[
+                      styles.agendaTimeToggle,
+                      {
+                        borderColor: agendaTaskTimeEnabled ? '#E8A24D' : palette.border,
+                        backgroundColor: agendaTaskTimeEnabled
+                          ? (isDarkTheme ? '#422006' : '#FFF7ED')
+                          : palette.settingsInputBg,
+                      },
+                    ]}
+                    onPress={() => {
+                      if (agendaTaskTimeEnabled) {
+                        setAgendaTaskTimeEnabled(false);
+                        setAgendaTaskTimeText('');
+                        return;
+                      }
+                      setAgendaTaskTimeEnabled(true);
+                      setAgendaTaskTimeText(getDefaultTaskTime());
+                    }}
+                    activeOpacity={0.88}
+                  >
+                    <Ionicons
+                      name={agendaTaskTimeEnabled ? 'time' : 'time-outline'}
+                      size={16}
+                      color={agendaTaskTimeEnabled ? '#D97706' : palette.textSecondary}
+                    />
+                    <Text
+                      style={[
+                        styles.agendaTimeToggleText,
+                        { color: agendaTaskTimeEnabled ? '#D97706' : palette.textSecondary },
+                      ]}
+                    >
+                      {t.agendaAddTime}
+                    </Text>
+                  </TouchableOpacity>
+                  {agendaTaskTimeEnabled ? (
+                    <TextInput
+                      value={agendaTaskTimeText}
+                      onChangeText={setAgendaTaskTimeText}
+                      placeholder={t.agendaTimePlaceholder}
+                      placeholderTextColor={isDarkTheme ? '#94A3B8' : '#9CA3AF'}
+                      keyboardType={Platform.OS === 'ios' ? 'numbers-and-punctuation' : 'default'}
+                      maxLength={5}
+                      style={[
+                        styles.agendaTimeInput,
+                        { color: palette.textPrimary, borderColor: palette.border, backgroundColor: palette.cardBg },
+                      ]}
+                    />
+                  ) : null}
+                </View>
+                {agendaTaskTimeEnabled ? (
+                  <Text style={[styles.agendaTimeHint, { color: palette.textSecondary }]}>{t.agendaTimeHint}</Text>
+                ) : null}
                 <Text style={[styles.agendaColorHint, { color: palette.textSecondary }]}>Gorevin onemini bir renk secerek belirt.</Text>
                 <View style={styles.agendaColorRow}>
                   {AGENDA_COLORS.map((color) => {
@@ -2237,6 +2525,39 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginTop: -4,
   },
+  homeJournalCard: {
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    gap: 10,
+  },
+  homeJournalCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  homeJournalCardText: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+  homeGoJournalButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    alignSelf: 'flex-start',
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+  homeGoJournalText: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
   homeSummaryText: {
     fontSize: 13,
     fontWeight: '600',
@@ -2715,8 +3036,17 @@ const styles = StyleSheet.create({
   agendaTaskMain: {
     flex: 1,
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     gap: 10,
+  },
+  agendaTaskTextWrap: {
+    flex: 1,
+    gap: 2,
+  },
+  agendaTaskTime: {
+    fontSize: 12,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
   },
   agendaTaskCheckButton: {
     width: 22,
@@ -2791,6 +3121,44 @@ const styles = StyleSheet.create({
       },
     }),
   },
+  agendaTimeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  agendaTimeToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+  },
+  agendaTimeToggleText: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  agendaTimeInput: {
+    minWidth: 84,
+    borderWidth: 1,
+    borderRadius: 10,
+    fontSize: 14,
+    fontWeight: '700',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    fontVariant: ['tabular-nums'],
+    ...Platform.select({
+      web: {
+        outlineStyle: 'none',
+      },
+    }),
+  },
+  agendaTimeHint: {
+    fontSize: 11,
+    marginTop: -4,
+  },
   agendaColorRow: {
     flexDirection: 'row',
     gap: 8,
@@ -2853,6 +3221,29 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#F3DCAA',
   },
+  entryCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    marginBottom: 4,
+  },
+  journalSwipeHintBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    borderRadius: 999,
+  },
+  journalSwipeDeleteAction: {
+    width: 76,
+    borderRadius: 10,
+    marginLeft: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#DC2626',
+    gap: 2,
+  },
   entryCardActive: {
     borderColor: '#F59E0B',
     backgroundColor: '#FFECC2',
@@ -2861,7 +3252,7 @@ const styles = StyleSheet.create({
     color: '#A16207',
     fontSize: 11,
     fontWeight: '700',
-    marginBottom: 4,
+    flex: 1,
   },
   entryPreview: {
     color: '#6B4F00',

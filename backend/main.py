@@ -2,6 +2,7 @@ import sqlite3
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy import case
 from sqlalchemy.orm import Session
 from passlib.context import CryptContext
 from datetime import datetime, timedelta
@@ -71,6 +72,36 @@ def ensure_journal_photo_offset_columns():
         conn.close()
 
 
+def ensure_agenda_task_time_column():
+    conn = sqlite3.connect("agenda.db")
+    try:
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(agenda_tasks)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "task_time" not in columns:
+            cursor.execute("ALTER TABLE agenda_tasks ADD COLUMN task_time TEXT")
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def normalize_task_time(value: str | None) -> str | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    parts = raw.split(":")
+    if len(parts) != 2:
+        raise HTTPException(status_code=400, detail="Saat formati gecersiz. Ornek: 14:30")
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Saat formati gecersiz. Ornek: 14:30") from exc
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise HTTPException(status_code=400, detail="Saat degeri gecersiz.")
+    return f"{hour:02d}:{minute:02d}"
+
+
 def normalize_journal_payload(entry: schemas.JournalEntryCreate) -> tuple[str, str | None, int, int]:
     content = (entry.content or "").strip()
     photo = (entry.photo or "").strip() or None
@@ -87,6 +118,7 @@ ensure_journal_user_column()
 ensure_agenda_completed_column()
 ensure_journal_photo_column()
 ensure_journal_photo_offset_columns()
+ensure_agenda_task_time_column()
 
 app.add_middleware(
     CORSMiddleware,
@@ -258,6 +290,25 @@ def update_journal_entry(
     return journal_entry
 
 
+@app.delete("/journal/{entry_id}")
+def delete_journal_entry(
+    entry_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    journal_entry = (
+        db.query(models.JournalEntry)
+        .filter(models.JournalEntry.id == entry_id, models.JournalEntry.user_id == current_user.id)
+        .first()
+    )
+    if not journal_entry:
+        raise HTTPException(status_code=404, detail="Gunluk kaydi bulunamadi.")
+
+    db.delete(journal_entry)
+    db.commit()
+    return {"message": "Gunluk kaydi silindi."}
+
+
 @app.get("/agenda", response_model=list[schemas.AgendaTaskOut])
 def list_agenda_tasks(
     task_date: str | None = None,
@@ -267,7 +318,11 @@ def list_agenda_tasks(
     query = db.query(models.AgendaTask).filter(models.AgendaTask.user_id == current_user.id)
     if task_date:
         query = query.filter(models.AgendaTask.task_date == task_date)
-    return query.order_by(models.AgendaTask.created_at.asc()).all()
+    return query.order_by(
+        case((models.AgendaTask.task_time.is_(None), 1), else_=0),
+        models.AgendaTask.task_time.asc(),
+        models.AgendaTask.created_at.asc(),
+    ).all()
 
 
 @app.post("/agenda", response_model=schemas.AgendaTaskOut)
@@ -287,11 +342,14 @@ def create_agenda_task(
     if not color:
         raise HTTPException(status_code=400, detail="Renk alani zorunlu.")
 
+    task_time = normalize_task_time(task.task_time)
+
     new_task = models.AgendaTask(
         user_id=current_user.id,
         task_date=task_date,
         content=content,
         color=color,
+        task_time=task_time,
     )
     db.add(new_task)
     db.commit()

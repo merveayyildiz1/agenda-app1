@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -130,7 +130,7 @@ const buildDateStrip = (days = 10, baseDate = new Date()) => {
 
 export default function HomeScreen({ authToken, onLogout }) {
   const todayRef = useRef(new Date());
-  const [activeTab, setActiveTab] = useState('Ajanda');
+  const [activeTab, setActiveTab] = useState('Ana Sayfa');
   const [journalText, setJournalText] = useState('');
   const [journalPhoto, setJournalPhoto] = useState(null);
   const [journalPhotoOffset, setJournalPhotoOffset] = useState(DEFAULT_JOURNAL_PHOTO_OFFSET);
@@ -172,6 +172,9 @@ export default function HomeScreen({ authToken, onLogout }) {
   const stopwatchSegmentStartRef = useRef(null);
   const [statsAgendaAll, setStatsAgendaAll] = useState([]);
   const [statsAgendaLoading, setStatsAgendaLoading] = useState(false);
+  const [homeTodayTasks, setHomeTodayTasks] = useState([]);
+  const [homeTodayLoading, setHomeTodayLoading] = useState(false);
+  const todayDateKey = useMemo(() => toDateKey(new Date()), []);
 
   const isDarkTheme = theme === 'dark';
 
@@ -215,6 +218,7 @@ export default function HomeScreen({ authToken, onLogout }) {
       }
       const savedTab = globalThis?.localStorage?.getItem(ACTIVE_TAB_KEY);
       if (
+        savedTab === 'Ana Sayfa' ||
         savedTab === 'Kronometre' ||
         savedTab === 'Gunluk' ||
         savedTab === 'Ajanda' ||
@@ -294,6 +298,43 @@ export default function HomeScreen({ authToken, onLogout }) {
 
     loadJournalEntries();
   }, [authToken, onLogout]);
+
+  const loadHomeTodayTasks = useCallback(async () => {
+    if (!authToken) {
+      return;
+    }
+
+    setHomeTodayLoading(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/agenda?task_date=${todayDateKey}`, {
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+        },
+      });
+      const data = await response.json();
+      if (response.status === 401) {
+        onLogout?.();
+        return;
+      }
+      if (response.ok && Array.isArray(data)) {
+        setHomeTodayTasks(data);
+      }
+    } catch (error) {
+      console.error('Ana sayfa gorevleri yuklenemedi:', error);
+    } finally {
+      setHomeTodayLoading(false);
+    }
+  }, [authToken, onLogout, todayDateKey]);
+
+  useEffect(() => {
+    loadHomeTodayTasks();
+  }, [loadHomeTodayTasks]);
+
+  useEffect(() => {
+    if (activeTab === 'Ana Sayfa') {
+      loadHomeTodayTasks();
+    }
+  }, [activeTab, loadHomeTodayTasks]);
 
   useEffect(() => {
     const loadAgendaTasks = async () => {
@@ -471,9 +512,13 @@ export default function HomeScreen({ authToken, onLogout }) {
         newPassword: 'New password',
         confirmPassword: 'Confirm new password',
         updatePassword: 'Update Password',
+        tabHome: 'Home',
         tabTimer: 'Timer',
         tabJournal: 'Journal',
         tabAgenda: 'Agenda',
+        homeTitle: "Today's plan",
+        homeEmptyTasks: 'No tasks for today yet.',
+        homeGoAgenda: 'Add in Agenda',
         tabSettings: 'Settings',
         tabStats: 'Stats',
         statScreenTitle: 'Statistics',
@@ -510,9 +555,13 @@ export default function HomeScreen({ authToken, onLogout }) {
       newPassword: 'Yeni sifre',
       confirmPassword: 'Yeni sifre (tekrar)',
       updatePassword: 'Sifreyi Guncelle',
+      tabHome: 'Ana Sayfa',
       tabTimer: 'Kronometre',
       tabJournal: 'Gunluk',
       tabAgenda: 'Ajanda',
+      homeTitle: 'Bugunun plani',
+      homeEmptyTasks: 'Bugun icin henuz gorev eklenmedi.',
+      homeGoAgenda: 'Ajandadan ekle',
       tabSettings: 'Ayarlar',
       tabStats: 'Istatistik',
       statScreenTitle: 'Istatistik',
@@ -916,6 +965,9 @@ export default function HomeScreen({ authToken, onLogout }) {
 
       setAgendaTasks((prev) => [...prev, data]);
       setAgendaMonthTasks((prev) => [...prev, data]);
+      if (data.task_date === todayDateKey) {
+        setHomeTodayTasks((prev) => [...prev, data]);
+      }
       setAgendaTaskText('');
     } catch (error) {
       console.error('Ajanda gorevi kaydedilemedi:', error);
@@ -960,6 +1012,7 @@ export default function HomeScreen({ authToken, onLogout }) {
 
       setAgendaTasks((prev) => prev.filter((task) => Number(task.id) !== id));
       setAgendaMonthTasks((prev) => prev.filter((task) => Number(task.id) !== id));
+      setHomeTodayTasks((prev) => prev.filter((task) => Number(task.id) !== id));
     } catch (error) {
       console.error('Ajanda gorevi silinemedi:', error);
       Alert.alert('Hata', 'Sunucuya baglanirken bir sorun olustu.');
@@ -998,6 +1051,7 @@ export default function HomeScreen({ authToken, onLogout }) {
 
       setAgendaTasks((prev) => prev.map((task) => (Number(task.id) === id ? data : task)));
       setAgendaMonthTasks((prev) => prev.map((task) => (Number(task.id) === id ? data : task)));
+      setHomeTodayTasks((prev) => prev.map((task) => (Number(task.id) === id ? data : task)));
     } catch (error) {
       console.error('Ajanda gorevi durumu guncellenemedi:', error);
       Alert.alert('Hata', 'Sunucuya baglanirken bir sorun olustu.');
@@ -1113,12 +1167,117 @@ export default function HomeScreen({ authToken, onLogout }) {
     [statsAgendaAll],
   );
 
+  const homeTodayCompletedCount = useMemo(
+    () => homeTodayTasks.filter((task) => Boolean(task.completed)).length,
+    [homeTodayTasks],
+  );
+
+  const homeTodayDateLabel = useMemo(() => {
+    const parsed = parseDateKey(todayDateKey);
+    return parsed.toLocaleDateString(language === 'en' ? 'en-US' : 'tr-TR', {
+      weekday: 'long',
+      day: 'numeric',
+      month: 'long',
+    });
+  }, [todayDateKey, language]);
+
   return (
     <GestureHandlerRootView style={styles.gestureRoot}>
     <SafeAreaView style={[styles.container, { backgroundColor: palette.pageBg }]}>
       <StatusBar barStyle={isDarkTheme ? 'light-content' : 'dark-content'} backgroundColor={palette.pageBg} />
-      <View style={[styles.content, (activeTab === 'Ayarlar' || activeTab === 'Ajanda' || activeTab === 'Kronometre' || activeTab === 'Istatistik') && styles.contentSettings]}>
-        {activeTab === 'Gunluk' ? (
+      <View style={[styles.content, (activeTab === 'Ana Sayfa' || activeTab === 'Ayarlar' || activeTab === 'Ajanda' || activeTab === 'Kronometre' || activeTab === 'Istatistik') && styles.contentSettings]}>
+        {activeTab === 'Ana Sayfa' ? (
+          <ScrollView
+            style={styles.homeLayout}
+            contentContainerStyle={[
+              styles.homeScrollContent,
+              { paddingBottom: Math.max(32, Math.round(windowHeight * 0.06)) },
+            ]}
+            showsVerticalScrollIndicator={false}
+          >
+            <Text style={[styles.homeTitle, { color: palette.textPrimary }]}>{t.homeTitle}</Text>
+            <Text style={[styles.homeDateLabel, { color: palette.textSecondary }]}>{homeTodayDateLabel}</Text>
+            {homeTodayTasks.length > 0 ? (
+              <Text style={[styles.homeSummaryText, { color: palette.textSecondary }]}>
+                {language === 'en'
+                  ? `${homeTodayCompletedCount}/${homeTodayTasks.length} completed`
+                  : `${homeTodayCompletedCount}/${homeTodayTasks.length} tamamlandi`}
+              </Text>
+            ) : null}
+
+            {homeTodayLoading ? (
+              <View style={styles.homeLoadingRow}>
+                <ActivityIndicator color="#E8A24D" />
+              </View>
+            ) : null}
+
+            <View style={[styles.homeTasksCard, { borderColor: palette.border, backgroundColor: palette.cardBg }]}>
+              <ScrollView
+                style={styles.homeTaskList}
+                contentContainerStyle={styles.homeTaskListContent}
+                nestedScrollEnabled
+                showsVerticalScrollIndicator={false}
+              >
+                {homeTodayTasks.length === 0 && !homeTodayLoading ? (
+                  <Text style={[styles.homeEmptyText, { color: palette.textSecondary }]}>{t.homeEmptyTasks}</Text>
+                ) : (
+                  homeTodayTasks.map((task) => (
+                    <Swipeable
+                      key={task.id}
+                      overshootRight={false}
+                      renderRightActions={() => renderAgendaRightAction(task.id)}
+                    >
+                      <View style={[styles.agendaTaskRow, { borderColor: palette.border, backgroundColor: isDarkTheme ? '#1E293B' : '#FFFDF5' }]}>
+                        <View style={[styles.agendaTaskColorStripe, { backgroundColor: task.color || '#EF4444' }]} />
+                        <View style={styles.agendaTaskBody}>
+                          <View style={styles.agendaTaskMain}>
+                            <TouchableOpacity
+                              style={[
+                                styles.agendaTaskCheckButton,
+                                {
+                                  borderColor: task.completed ? '#22C55E' : palette.border,
+                                  backgroundColor: task.completed ? '#DCFCE7' : (isDarkTheme ? '#1E293B' : '#FFFFFF'),
+                                },
+                              ]}
+                              onPress={() => toggleAgendaTaskCompleted(task.id, !task.completed)}
+                              activeOpacity={0.85}
+                            >
+                              {task.completed ? <Ionicons name="checkmark" size={14} color="#15803D" /> : null}
+                            </TouchableOpacity>
+                            <Text
+                              style={[
+                                styles.agendaTaskText,
+                                { color: palette.textPrimary },
+                                task.completed && styles.agendaTaskTextCompleted,
+                              ]}
+                            >
+                              {task.content}
+                            </Text>
+                          </View>
+                          <View style={styles.agendaTaskActions}>
+                            <View style={[styles.agendaTaskColorBadge, { backgroundColor: task.color || '#EF4444' }]} />
+                          </View>
+                        </View>
+                      </View>
+                    </Swipeable>
+                  ))
+                )}
+              </ScrollView>
+            </View>
+
+            <TouchableOpacity
+              style={[styles.homeGoAgendaButton, { borderColor: palette.border, backgroundColor: palette.settingsInputBg }]}
+              onPress={() => {
+                setSelectedAgendaDate(todayDateKey);
+                setActiveTab('Ajanda');
+              }}
+              activeOpacity={0.88}
+            >
+              <Ionicons name="calendar-outline" size={16} color={palette.textPrimary} />
+              <Text style={[styles.homeGoAgendaText, { color: palette.textPrimary }]}>{t.homeGoAgenda}</Text>
+            </TouchableOpacity>
+          </ScrollView>
+        ) : activeTab === 'Gunluk' ? (
           <View style={styles.journalLayout}>
             <View style={[styles.journalSidebar, { backgroundColor: palette.cardBg, borderColor: palette.border }]}>
               <Text style={[styles.sidebarTitle, { color: palette.textPrimary }]}>Kaydedilenler</Text>
@@ -1803,7 +1962,7 @@ export default function HomeScreen({ authToken, onLogout }) {
             <Text style={[styles.subtitle, { color: palette.textSecondary }]}>{screenContent.subtitle}</Text>
           </>
         )}
-        {activeTab !== 'Gunluk' && activeTab !== 'Ayarlar' && activeTab !== 'Ajanda' && activeTab !== 'Kronometre' && activeTab !== 'Istatistik' && (
+        {activeTab !== 'Ana Sayfa' && activeTab !== 'Gunluk' && activeTab !== 'Ayarlar' && activeTab !== 'Ajanda' && activeTab !== 'Kronometre' && activeTab !== 'Istatistik' && (
           <TouchableOpacity
             style={styles.logoutButton}
             onPress={onLogout}
@@ -1814,6 +1973,31 @@ export default function HomeScreen({ authToken, onLogout }) {
       </View>
 
       <View style={[styles.bottomBar, { backgroundColor: palette.bottomBg, borderTopColor: palette.border }]}>
+        <TouchableOpacity
+          style={[
+            styles.tabButton,
+            { backgroundColor: palette.tabBg },
+            activeTab === 'Ana Sayfa' && styles.tabButtonActive,
+            activeTab === 'Ana Sayfa' && { backgroundColor: palette.tabActiveBg },
+          ]}
+          onPress={() => setActiveTab('Ana Sayfa')}
+        >
+          <Ionicons
+            name="home-outline"
+            size={18}
+            style={styles.tabIcon}
+            color={activeTab === 'Ana Sayfa' ? palette.tabTextActive : palette.tabText}
+          />
+          <Text
+            style={[styles.tabText, { color: palette.tabText }, activeTab === 'Ana Sayfa' && { color: palette.tabTextActive }]}
+            numberOfLines={1}
+            adjustsFontSizeToFit
+            minimumFontScale={0.6}
+          >
+            {t.tabHome}
+          </Text>
+        </TouchableOpacity>
+
         <TouchableOpacity
           style={[
             styles.tabButton,
@@ -1960,6 +2144,65 @@ const styles = StyleSheet.create({
   contentSettings: {
     justifyContent: 'flex-start',
     paddingTop: 10,
+  },
+  homeLayout: {
+    width: '100%',
+    flex: 1,
+  },
+  homeScrollContent: {
+    gap: 12,
+    paddingTop: 4,
+  },
+  homeTitle: {
+    fontSize: 26,
+    fontWeight: '800',
+  },
+  homeDateLabel: {
+    fontSize: 15,
+    fontWeight: '600',
+    marginTop: -4,
+  },
+  homeSummaryText: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  homeLoadingRow: {
+    paddingVertical: 8,
+    alignItems: 'center',
+  },
+  homeTasksCard: {
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    minHeight: 180,
+    maxHeight: 420,
+  },
+  homeTaskList: {
+    flexGrow: 0,
+  },
+  homeTaskListContent: {
+    gap: 8,
+    paddingBottom: 4,
+  },
+  homeEmptyText: {
+    fontSize: 14,
+    textAlign: 'center',
+    paddingVertical: 24,
+  },
+  homeGoAgendaButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+  },
+  homeGoAgendaText: {
+    fontSize: 14,
+    fontWeight: '700',
   },
   title: {
     fontSize: 32,

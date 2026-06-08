@@ -10,4 +10,4 @@
 
 6.video  https://drive.google.com/file/d/1ruMRQxNI8gu7rqQtWwUsBZBBFIteWB-1/view?usp=drive_link
 
-7.video  https://drive.google.com/file/d/1Mpl3RN5yZjZGqVduFdcB-Ilol3CN8bgV/view?usp=drive_link
+7.video  https://drive.google.com/file/d/1HbmXu1HNZhRaESUHWPsFTzE-uXEfnIRp/view?usp=sharing

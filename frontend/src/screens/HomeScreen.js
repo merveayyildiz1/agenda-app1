@@ -168,6 +168,7 @@ export default function HomeScreen({ authToken, onLogout }) {
   const { height: windowHeight } = useWindowDimensions();
   const [stopwatchRunning, setStopwatchRunning] = useState(false);
   const [stopwatchRenderTick, setStopwatchRenderTick] = useState(0);
+  const [stopwatchLaps, setStopwatchLaps] = useState([]);
   const stopwatchAccumulatedRef = useRef(0);
   const stopwatchSegmentStartRef = useRef(null);
   const [statsAgendaAll, setStatsAgendaAll] = useState([]);
@@ -478,10 +479,31 @@ export default function HomeScreen({ authToken, onLogout }) {
     setStopwatchRunning(true);
   };
 
+  const handleStopwatchLapPress = () => {
+    if (stopwatchElapsedMs < 100) {
+      return;
+    }
+    const previousTotal = stopwatchLaps.length > 0 ? stopwatchLaps[stopwatchLaps.length - 1].totalMs : 0;
+    const lapMs = stopwatchElapsedMs - previousTotal;
+    if (lapMs < 100) {
+      return;
+    }
+    setStopwatchLaps((prev) => [
+      ...prev,
+      {
+        id: `${Date.now()}-${prev.length + 1}`,
+        lapNumber: prev.length + 1,
+        lapMs,
+        totalMs: stopwatchElapsedMs,
+      },
+    ]);
+  };
+
   const handleStopwatchResetPress = () => {
     stopwatchAccumulatedRef.current = 0;
     stopwatchSegmentStartRef.current = null;
     setStopwatchRunning(false);
+    setStopwatchLaps([]);
     setStopwatchRenderTick((n) => n + 1);
   };
 
@@ -532,6 +554,9 @@ export default function HomeScreen({ authToken, onLogout }) {
         chronoPause: 'Pause',
         chronoResume: 'Resume',
         chronoReset: 'Reset',
+        chronoLap: 'Lap',
+        chronoLapsTitle: 'Laps',
+        chronoLapTotal: 'Total',
         journalAddPhoto: 'Add photo',
         journalRemovePhoto: 'Remove photo',
         journalPhotoBadge: 'Photo',
@@ -575,6 +600,9 @@ export default function HomeScreen({ authToken, onLogout }) {
       chronoPause: 'Duraklat',
       chronoResume: 'Devam',
       chronoReset: 'Sifirla',
+      chronoLap: 'Tur',
+      chronoLapsTitle: 'Turler',
+      chronoLapTotal: 'Toplam',
       journalAddPhoto: 'Fotograf ekle',
       journalRemovePhoto: 'Fotografi kaldir',
       journalPhotoBadge: 'Fotograf',
@@ -1862,7 +1890,14 @@ export default function HomeScreen({ authToken, onLogout }) {
             </View>
           </ScrollView>
         ) : activeTab === 'Kronometre' ? (
-          <View style={styles.chronometerLayout}>
+          <ScrollView
+            style={styles.chronometerLayout}
+            contentContainerStyle={[
+              styles.chronometerScrollContent,
+              { paddingBottom: Math.max(24, Math.round(windowHeight * 0.04)) },
+            ]}
+            showsVerticalScrollIndicator={false}
+          >
             <View style={[styles.chronometerCard, { borderColor: palette.border, backgroundColor: palette.cardBg }]}>
               <Text style={[styles.chronometerTime, { color: palette.textPrimary }]}>
                 {formatStopwatchDisplay(stopwatchElapsedMs)}
@@ -1895,6 +1930,22 @@ export default function HomeScreen({ authToken, onLogout }) {
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={[
+                    styles.chronometerLapButton,
+                    {
+                      borderColor: palette.border,
+                      backgroundColor: palette.settingsInputBg,
+                      opacity: stopwatchRunning || stopwatchElapsedMs > 0 ? 1 : 0.45,
+                    },
+                  ]}
+                  onPress={handleStopwatchLapPress}
+                  disabled={!stopwatchRunning && stopwatchElapsedMs === 0}
+                  activeOpacity={0.88}
+                >
+                  <Ionicons name="flag-outline" size={17} color={palette.textPrimary} />
+                  <Text style={[styles.chronometerLapButtonText, { color: palette.textPrimary }]}>{t.chronoLap}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
                     styles.chronometerSecondaryButton,
                     {
                       borderColor: palette.border,
@@ -1911,7 +1962,31 @@ export default function HomeScreen({ authToken, onLogout }) {
                 </TouchableOpacity>
               </View>
             </View>
-          </View>
+
+            {stopwatchLaps.length > 0 ? (
+              <View style={[styles.chronometerLapsCard, { borderColor: palette.border, backgroundColor: palette.cardBg }]}>
+                <Text style={[styles.chronometerLapsTitle, { color: palette.textPrimary }]}>{t.chronoLapsTitle}</Text>
+                {[...stopwatchLaps].reverse().map((lap) => (
+                  <View
+                    key={lap.id}
+                    style={[styles.chronometerLapRow, { borderTopColor: palette.border }]}
+                  >
+                    <Text style={[styles.chronometerLapLabel, { color: palette.textSecondary }]}>
+                      {language === 'en' ? `Lap ${lap.lapNumber}` : `Tur ${lap.lapNumber}`}
+                    </Text>
+                    <View style={styles.chronometerLapTimes}>
+                      <Text style={[styles.chronometerLapSplit, { color: palette.textPrimary }]}>
+                        {formatStopwatchDisplay(lap.lapMs)}
+                      </Text>
+                      <Text style={[styles.chronometerLapTotal, { color: palette.textSecondary }]}>
+                        {t.chronoLapTotal}: {formatStopwatchDisplay(lap.totalMs)}
+                      </Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            ) : null}
+          </ScrollView>
         ) : activeTab === 'Istatistik' ? (
           <ScrollView
             style={styles.statsLayout}
@@ -2288,8 +2363,13 @@ const styles = StyleSheet.create({
   chronometerLayout: {
     width: '100%',
     flex: 1,
+  },
+  chronometerScrollContent: {
+    flexGrow: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    gap: 14,
+    paddingTop: 8,
   },
   chronometerCard: {
     borderWidth: 1,
@@ -2307,7 +2387,7 @@ const styles = StyleSheet.create({
   },
   chronometerButtonsRow: {
     flexDirection: 'row',
-    gap: 12,
+    gap: 8,
     width: '100%',
     justifyContent: 'center',
     flexWrap: 'wrap',
@@ -2316,31 +2396,87 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    paddingVertical: 14,
-    paddingHorizontal: 22,
+    gap: 6,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
     borderRadius: 14,
     borderWidth: 1,
-    minWidth: 148,
+    minWidth: 108,
   },
   chronometerPrimaryButtonText: {
     fontSize: 16,
+    fontWeight: '700',
+  },
+  chronometerLapButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 14,
+    borderWidth: 1,
+    minWidth: 88,
+  },
+  chronometerLapButtonText: {
+    fontSize: 14,
     fontWeight: '700',
   },
   chronometerSecondaryButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    paddingVertical: 14,
-    paddingHorizontal: 20,
+    gap: 6,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
     borderRadius: 14,
     borderWidth: 1,
-    minWidth: 132,
+    minWidth: 100,
   },
   chronometerSecondaryButtonText: {
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '700',
+  },
+  chronometerLapsCard: {
+    width: '100%',
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    maxHeight: 280,
+  },
+  chronometerLapsTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    marginBottom: 8,
+  },
+  chronometerLapRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    gap: 12,
+  },
+  chronometerLapLabel: {
+    fontSize: 13,
+    fontWeight: '700',
+    minWidth: 52,
+  },
+  chronometerLapTimes: {
+    flex: 1,
+    alignItems: 'flex-end',
+    gap: 2,
+  },
+  chronometerLapSplit: {
+    fontSize: 16,
+    fontWeight: '800',
+    fontVariant: ['tabular-nums'],
+  },
+  chronometerLapTotal: {
+    fontSize: 12,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
   },
   statsLayout: {
     width: '100%',
